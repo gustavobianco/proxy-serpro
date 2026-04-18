@@ -220,12 +220,31 @@ app.post("/serpro/consultar", async (req, res) => {
     if (jwt) headers.jwt_token = jwt;
 
     // Chamada com mTLS via undici Agent
-    const integraResp = await undiciFetch(integraUrl, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-      dispatcher: mtlsAgent,
-    });
+    let integraResp;
+        try {
+          integraResp = await undiciFetch(integraUrl, {
+            method: "POST",
+            headers,
+            body: JSON.stringify(payload),
+            dispatcher: mtlsAgent,
+          });
+        } catch (fetchErr) {
+          // Falha de transporte/handshake — extrai todos os detalhes possíveis
+          const detalhes = extrairDetalhesErro(fetchErr);
+          console.error("[/serpro/consultar] falha mTLS upstream:", detalhes);
+          return res.status(502).json({
+            ok: false,
+            http_status: null,
+            ambiente: SERPRO_AMBIENTE,
+            duracao_ms: Date.now() - inicio,
+            stage: "mtls_upstream",
+            error: detalhes.mensagem,
+            error_name: detalhes.name,
+            error_code: detalhes.code,
+            error_cause: detalhes.cause,
+            diagnostico: classificarErroMtls(detalhes),
+          });
+        }
     const integraText = await integraResp.text();
     let integraJson = null;
     try {
@@ -239,20 +258,91 @@ app.post("/serpro/consultar", async (req, res) => {
       http_status: integraResp.status,
       ambiente: SERPRO_AMBIENTE,
       duracao_ms: Date.now() - inicio,
+      stage: "ok",
       payload: integraJson ?? { raw: integraText },
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error("[/serpro/consultar] erro:", msg);
+    const detalhes = extrairDetalhesErro(err);
+    console.error("[/serpro/consultar] erro:", detalhes);
     return res.status(500).json({
       ok: false,
       http_status: null,
       ambiente: SERPRO_AMBIENTE,
       duracao_ms: Date.now() - inicio,
-      error: msg,
+      stage: "internal",
+      error: detalhes.mensagem,
+      error_name: detalhes.name,
+      error_code: detalhes.code,
+      error_cause: detalhes.cause,
     });
   }
 });
+
+/**
+ * Achata um Error (incluindo err.cause de undici) em campos serializáveis.
+ * undici costuma colocar o erro real (TLS/socket) em err.cause.
+ */
+function extrairDetalhesErro(err) {
+  const out = {
+    mensagem: "",
+    name: null,
+    code: null,
+    cause: null,
+  };
+  if (err instanceof Error) {
+    out.mensagem = err.message || String(err);
+    out.name = err.name ?? null;
+    out.code = err.code ?? null;
+    const cause = err.cause;
+    if (cause) {
+      if (cause instanceof Error) {
+        out.cause = {
+          message: cause.message,
+          name: cause.name ?? null,
+          code: cause.code ?? null,
+          // alguns erros TLS expõem .reason / .library / .syscall
+          reason: cause.reason ?? null,
+          library: cause.library ?? null,
+          syscall: cause.syscall ?? null,
+        };
+      } else {
+        out.cause = { message: String(cause) };
+      }
+    }
+  } else {
+    out.mensagem = String(err);
+  }
+  return out;
+}
+/**
+ * Classifica os erros mTLS mais comuns em uma dica acionável para o operador.
+ */
+function classificarErroMtls(detalhes) {
+  const blob = JSON.stringify(detalhes).toLowerCase();
+  if (blob.includes("mac verify") || blob.includes("bad decrypt") || blob.includes("wrong password")) {
+    return "Senha do .pfx incorreta — confira SERPRO_CERT_PASSWORD no Railway.";
+  }
+  if (blob.includes("no start line") || blob.includes("asn1") || blob.includes("pkcs12")) {
+    return "Arquivo .pfx inválido ou corrompido — reenvie o certificado A1 ao Volume do Railway.";
+  }
+  if (blob.includes("certificate has expired") || blob.includes("cert has expired")) {
+    return "Certificado A1 vencido — emita um novo e atualize o Volume.";
+  }
+  if (blob.includes("unable to verify") || blob.includes("self signed") || blob.includes("unable to get")) {
+    return "Cadeia de confiança incompleta — verifique se o .pfx contém a cadeia completa.";
+  }
+  if (blob.includes("econnreset") || blob.includes("socket hang up") || blob.includes("epipe")) {
+    return "Handshake TLS interrompido pela SERPRO — certificado provavelmente não está habilitado para Integra Contador neste ambiente.";
+  }
+  if (blob.includes("enotfound") || blob.includes("eai_again") || blob.includes("etimedout")) {
+    return "Não foi possível alcançar a SERPRO — checar conectividade do container Railway.";
+  }
+  if (blob.includes("alert") || blob.includes("handshake") || blob.includes("tls")) {
+    return "Falha no handshake TLS com a SERPRO — checar validade, senha e habilitação do certificado.";
+  }
+  return null;
+}
+
 
 app.listen(Number(PORT), () => {
   console.log(`[boot] proxy SERPRO mTLS escutando em :${PORT} (ambiente=${SERPRO_AMBIENTE})`);
