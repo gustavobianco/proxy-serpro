@@ -25,7 +25,7 @@ import forge from "node-forge";
 const {
   PORT = "3000",
   PROXY_SHARED_SECRET,
-  SERPRO_AMBIENTE = "trial",
+  SERPRO_AMBIENTE = "producao",
   SERPRO_CONSUMER_KEY,
   SERPRO_CONSUMER_SECRET,
   SERPRO_CERT_PATH,
@@ -121,6 +121,7 @@ try {
   const p12Der = pfxBuffer.toString("binary");
   const p12Asn1 = forge.asn1.fromDer(p12Der);
   const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, SERPRO_CERT_PASSWORD);
+
   // extrai chave privada (PKCS#8 shrouded ou keyBag)
   const keyBags = p12.getBags({ bagType: forge.pki.oids.pkcs8ShroudedKeyBag });
   let keyObj = keyBags[forge.pki.oids.pkcs8ShroudedKeyBag]?.[0]?.key;
@@ -129,10 +130,12 @@ try {
     keyObj = plainKeyBags[forge.pki.oids.keyBag]?.[0]?.key;
   }
   if (!keyObj) throw new Error("nenhuma chave privada encontrada no PKCS#12");
+
   // extrai certificados
   const certBags = p12.getBags({ bagType: forge.pki.oids.certBag });
   const certs = (certBags[forge.pki.oids.certBag] ?? []).map((b) => b.cert);
   if (certs.length === 0) throw new Error("nenhum certificado encontrado no PKCS#12");
+
   // heurística: o cert do titular tem a chave pública correspondente à privada;
   // o resto é cadeia (CA intermediária + raiz)
   const pubKeyPem = forge.pki.publicKeyToPem(forge.pki.setRsaPublicKey(keyObj.n, keyObj.e));
@@ -140,6 +143,7 @@ try {
     (c) => forge.pki.publicKeyToPem(c.publicKey) === pubKeyPem,
   ) ?? certs[0];
   const cadeia = certs.filter((c) => c !== titular);
+
   pemKey = forge.pki.privateKeyToPem(keyObj);
   pemCert = forge.pki.certificateToPem(titular);
   pemCa = cadeia.map((c) => forge.pki.certificateToPem(c));
@@ -176,7 +180,6 @@ try {
   process.exit(1);
 }
 
-
 // Agent mTLS reutilizável — mantém keep-alive e handshake quente.
 // Usamos key+cert PEM (não pfx) para contornar a restrição do OpenSSL 3
 // que rejeita os algoritmos legados dos certificados A1 brasileiros
@@ -185,16 +188,27 @@ const mtlsAgent = new Agent({
   connect: {
     key: pemKey,
     cert: pemCert,
-    ...(pemCa.length > 0 ? { ca: pemCa } : {}),  },
+    ...(pemCa.length > 0 ? { ca: pemCa } : {}),
+  },
 });
 
-// Cache simples de access_token em memória (proxy é single-instance)
-let tokenCache = { value: null, expiresAt: 0 };
+// Cache simples de tokens em memória (proxy é single-instance).
+// SERPRO Integra Contador exige DOIS tokens em cada chamada:
+//   - Authorization: Bearer <access_token>
+//   - jwt_token: <jwt_token>
+// Ambos vêm na resposta do /token (OAuth) — o jwt_token NÃO é a procuração;
+// é parte do par de tokens obrigatórios do gateway. A procuração eletrônica
+// (plano com_procuracoes) é um JWT separado que SUBSTITUI o jwt_token do OAuth.
+let tokenCache = { accessToken: null, jwtToken: null, expiresAt: 0 };
 
 async function obterAccessToken() {
   const now = Date.now();
-  if (tokenCache.value && tokenCache.expiresAt - now > 60_000) {
-    return tokenCache.value;
+  if (
+    tokenCache.accessToken &&
+    tokenCache.jwtToken &&
+    tokenCache.expiresAt - now > 60_000
+  ) {
+    return { accessToken: tokenCache.accessToken, jwtToken: tokenCache.jwtToken };
   }
   const url = SERPRO_TOKEN_URLS[SERPRO_AMBIENTE];
   if (!url) throw new Error(`Ambiente inválido: ${SERPRO_AMBIENTE}`);
@@ -218,13 +232,20 @@ async function obterAccessToken() {
   }
   const json = JSON.parse(text);
   const accessToken = json.access_token;
+  const jwtToken = json.jwt_token;
   const expiresIn = json.expires_in ?? 3600;
   if (!accessToken) throw new Error("access_token vazio na resposta SERPRO");
+  if (!jwtToken) {
+    throw new Error(
+      "jwt_token vazio na resposta SERPRO (Integra Contador exige Bearer + jwt_token)",
+    );
+  }
   tokenCache = {
-    value: accessToken,
+    accessToken,
+    jwtToken,
     expiresAt: now + expiresIn * 1000,
   };
-  return accessToken;
+  return { accessToken, jwtToken };
 }
 
 const app = express();
@@ -279,7 +300,7 @@ app.post("/serpro/consultar", async (req, res) => {
         .json({ ok: false, error: "competencia inválida (esperado YYYYMM)" });
     }
 
-    const accessToken = await obterAccessToken();
+    const { accessToken, jwtToken } = await obterAccessToken();
     const integraUrl = SERPRO_INTEGRA_URLS[SERPRO_AMBIENTE];
     if (!integraUrl) {
       return res.status(500).json({ ok: false, error: `Ambiente inválido: ${SERPRO_AMBIENTE}` });
@@ -307,11 +328,11 @@ app.post("/serpro/consultar", async (req, res) => {
       },
     };
 
-    const headers = {
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    };
+    // Integra Contador exige SEMPRE os dois headers (Bearer + jwt_token).
+    // Por padrão usamos o jwt_token devolvido pelo OAuth. Se o body trouxer
+    // `jwt` (procuração específica do plano com_procuracoes), ele substitui
+    // após validação de formato e expiração.
+    let jwtFinal = jwtToken;
     if (jwt) {
       const jwtLimpo = String(jwt).trim().replace(/^Bearer\s+/i, "");
 
@@ -336,37 +357,43 @@ app.post("/serpro/consultar", async (req, res) => {
       }
 
       const preview = `${jwtLimpo.slice(0, 8)}…${jwtLimpo.slice(-8)}`;
-      console.log(`[/serpro/consultar] jwt_token presente (len=${jwtLimpo.length}, preview=${preview})`);
-
-      headers.jwt_token = jwtLimpo;
+      console.log(`[/serpro/consultar] jwt_token override via body (len=${jwtLimpo.length}, preview=${preview})`);
+      jwtFinal = jwtLimpo;
     }
+
+    const headers = {
+      Authorization: `Bearer ${accessToken}`,
+      jwt_token: jwtFinal,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    };
 
     // Chamada com mTLS via undici Agent
     let integraResp;
-        try {
-          integraResp = await undiciFetch(integraUrl, {
-            method: "POST",
-            headers,
-            body: JSON.stringify(payload),
-            dispatcher: mtlsAgent,
-          });
-        } catch (fetchErr) {
-          // Falha de transporte/handshake — extrai todos os detalhes possíveis
-          const detalhes = extrairDetalhesErro(fetchErr);
-          console.error("[/serpro/consultar] falha mTLS upstream:", detalhes);
-          return res.status(502).json({
-            ok: false,
-            http_status: null,
-            ambiente: SERPRO_AMBIENTE,
-            duracao_ms: Date.now() - inicio,
-            stage: "mtls_upstream",
-            error: detalhes.mensagem,
-            error_name: detalhes.name,
-            error_code: detalhes.code,
-            error_cause: detalhes.cause,
-            diagnostico: classificarErroMtls(detalhes),
-          });
-        }
+    try {
+      integraResp = await undiciFetch(integraUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        dispatcher: mtlsAgent,
+      });
+    } catch (fetchErr) {
+      // Falha de transporte/handshake — extrai todos os detalhes possíveis
+      const detalhes = extrairDetalhesErro(fetchErr);
+      console.error("[/serpro/consultar] falha mTLS upstream:", detalhes);
+      return res.status(502).json({
+        ok: false,
+        http_status: null,
+        ambiente: SERPRO_AMBIENTE,
+        duracao_ms: Date.now() - inicio,
+        stage: "mtls_upstream",
+        error: detalhes.mensagem,
+        error_name: detalhes.name,
+        error_code: detalhes.code,
+        error_cause: detalhes.cause,
+        diagnostico: classificarErroMtls(detalhes),
+      });
+    }
     const integraText = await integraResp.text();
     let integraJson = null;
     try {
@@ -442,13 +469,14 @@ function extrairDetalhesErro(err) {
   }
   return out;
 }
+
 /**
  * Classifica os erros mTLS mais comuns em uma dica acionável para o operador.
  */
 function classificarErroMtls(detalhes) {
   const blob = JSON.stringify(detalhes).toLowerCase();
   if (blob.includes("unsupported pkcs12") || blob.includes("err_crypto_unsupported_operation")) {
-  return "OpenSSL 3 rejeitou o PKCS#12 (algoritmo legado). O proxy já converte para PEM no boot — se está vendo isso, o redeploy ainda não pegou a versão nova.";
+    return "OpenSSL 3 rejeitou o PKCS#12 (algoritmo legado). O proxy já converte para PEM no boot — se está vendo isso, o redeploy ainda não pegou a versão nova.";
   }
   if (blob.includes("mac verify") || blob.includes("bad decrypt") || blob.includes("wrong password")) {
     return "Senha do .pfx incorreta — confira SERPRO_CERT_PASSWORD no Railway.";
@@ -473,7 +501,6 @@ function classificarErroMtls(detalhes) {
   }
   return null;
 }
-
 
 app.listen(Number(PORT), () => {
   console.log(`[boot] proxy SERPRO mTLS escutando em :${PORT} (ambiente=${SERPRO_AMBIENTE})`);
