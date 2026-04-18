@@ -1,0 +1,19 @@
+{
+  "name": "serpro-mtls-proxy",
+  "version": "1.0.0",
+  "description": "Proxy mTLS para chamadas Integra Contador SERPRO. Recebe requisições da Edge Function (Supabase) e encaminha à SERPRO usando certificado A1 (.pfx) via mTLS.",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "undici": "^6.21.0"
+  }
+}
