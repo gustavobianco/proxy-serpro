@@ -202,12 +202,16 @@ async function obterAccessToken() {
     `${SERPRO_CONSUMER_KEY}:${SERPRO_CONSUMER_SECRET}`,
   ).toString("base64");
 
-  // /authenticate exige mTLS (mesmo certificado A1) — usa undiciFetch com dispatcher
+  // /authenticate exige mTLS (mesmo certificado A1) — usa undiciFetch com dispatcher.
+  // Role-Type é OBRIGATÓRIO no /authenticate do Integra Contador:
+  //   - TERCEIROS  → escritório de contabilidade atuando em nome do contribuinte (nosso caso)
+  //   - PROCURADOR → procurador eletrônico no e-CAC
   const resp = await undiciFetch(url, {
     method: "POST",
     headers: {
       Authorization: `Basic ${basic}`,
       "Content-Type": "application/x-www-form-urlencoded",
+      "Role-Type": "TERCEIROS",
     },
     body: "grant_type=client_credentials",
     dispatcher: mtlsAgent,
