@@ -53,35 +53,45 @@ railway init
 railway up
 ```
 
-### 2. Criar um Volume para o certificado
+### 2. Subir o certificado A1
 
-O `.pfx` **nunca** entra no Git. Use um Volume persistente do Railway:
+O proxy aceita **dois métodos**. Use o que for mais prático.
+
+#### Método A — Volume + arquivo `.pfx` binário (recomendado)
 
 1. No projeto Railway → **Settings → Volumes → New Volume**
-2. Mount path: `/data`
-3. Tamanho: 1 GB (mais que suficiente)
-
-### 3. Subir o cert.pfx para o Volume
-
-Use a Railway CLI para abrir um shell na instância e copiar o arquivo:
+2. Mount path: `/data`, tamanho 1 GB
+3. Suba o `.pfx` **binário** (NÃO converter para base64) pra `/data/cert.pfx`:
 
 ```bash
-# A partir da máquina onde está o cert.pfx
-railway link                        # selecione o projeto/serviço
-railway run bash                    # abre shell na instância
-# Em outro terminal local:
+railway link
 railway shell -- cat > /data/cert.pfx < ./cert.pfx
+chmod 600 /data/cert.pfx
 ```
 
-Alternativa simples: hospede o `.pfx` num bucket privado temporário (ex: S3 pré-assinado por 5min) e dentro do shell rode:
+Ou via URL pré-assinada temporária (S3/Drive) dentro do shell:
 ```bash
 curl -o /data/cert.pfx "<URL-pré-assinada>"
 chmod 600 /data/cert.pfx
 ```
+Depois **revogue a URL**. Configure `SERPRO_CERT_PATH=/data/cert.pfx`.
 
-Depois **remova a URL pré-assinada**.
+#### Método B — Variável de ambiente em base64
 
-### 4. Configurar variáveis de ambiente
+Quando não dá pra montar Volume, gere o base64 do `.pfx`:
+
+```bash
+base64 -w0 cert.pfx
+# cole o resultado em SERPRO_CERT_BASE64 no Railway → Variables
+```
+
+Se `SERPRO_CERT_BASE64` estiver definida e não-vazia, ela tem prioridade sobre `SERPRO_CERT_PATH`.
+
+> **Autodetect:** se você acidentalmente subir um `.pfx` em base64 (texto ASCII) pro Volume, o proxy detecta no boot e decodifica automaticamente — vai aparecer no log `base64 detectado, decodificado`.
+
+> **Validação no boot:** o proxy tenta abrir o PKCS#12 com a senha logo no boot. Se a senha estiver errada ou o arquivo não for um `.pfx` válido, o container falha imediatamente com mensagem clara — você não precisa esperar a primeira chamada à SERPRO pra descobrir o problema.
+
+### 3. Configurar variáveis de ambiente
 
 No Railway → **Variables**, adicione (use `.env.example` como referência):
 
@@ -91,7 +101,8 @@ No Railway → **Variables**, adicione (use `.env.example` como referência):
 | `SERPRO_AMBIENTE` | `trial`, `demonstracao` ou `producao` |
 | `SERPRO_CONSUMER_KEY` | da loja SERPRO |
 | `SERPRO_CONSUMER_SECRET` | da loja SERPRO |
-| `SERPRO_CERT_PATH` | `/data/cert.pfx` |
+| `SERPRO_CERT_PATH` | `/data/cert.pfx` (Método A) — opcional se usar Método B |
+| `SERPRO_CERT_BASE64` | conteúdo do `.pfx` em base64 (Método B) — opcional se usar Método A |
 | `SERPRO_CERT_PASSWORD` | senha do `.pfx` |
 | `CONTRATANTE_CNPJ` | CNPJ do escritório (só dígitos) |
 | `AUTOR_PEDIDO_CNPJ` | opcional, default = `CONTRATANTE_CNPJ` |
