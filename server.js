@@ -16,7 +16,8 @@
 
 import "dotenv/config";
 import express from "express";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, statSync } from "node:fs";
+import { dirname } from "node:path";
 import { Agent, fetch as undiciFetch } from "undici";
 
 const {
@@ -29,6 +30,7 @@ const {
   SERPRO_CERT_PASSWORD,
   CONTRATANTE_CNPJ,
   AUTOR_PEDIDO_CNPJ,
+  CERT_PFX_BASE64,
 } = process.env;
 
 // Validação eager das variáveis críticas — falha rápido no boot
@@ -57,6 +59,21 @@ const SERPRO_INTEGRA_URLS = {
   demonstracao: "https://apigateway.serpro.gov.br/integra-contador-demonstracao/v1/Consultar",
   producao: "https://gateway.apiserpro.serpro.gov.br/integra-contador/v1/Consultar",
 };
+
+// Se CERT_PFX_BASE64 estiver definida, grava o .pfx no disco antes de ler.
+// Isso permite injetar o certificado via variável de ambiente sem depender
+// de upload manual para o Volume.
+if (CERT_PFX_BASE64) {
+  const certDir = dirname(SERPRO_CERT_PATH);
+  if (!existsSync(certDir)) {
+    mkdirSync(certDir, { recursive: true });
+  }
+  writeFileSync(SERPRO_CERT_PATH, Buffer.from(CERT_PFX_BASE64, "base64"));
+  chmodSync(SERPRO_CERT_PATH, 0o600);
+  console.log(
+    `[boot] cert.pfx gravado em ${SERPRO_CERT_PATH} (${statSync(SERPRO_CERT_PATH).size} bytes)`,
+  );
+}
 
 // Carrega o .pfx uma única vez no boot
 let pfxBuffer;
