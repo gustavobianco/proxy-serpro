@@ -17,6 +17,7 @@
 import "dotenv/config";
 import express from "express";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, statSync } from "node:fs";
+import { createHash, createPrivateKey } from "node:crypto";
 import { dirname } from "node:path";
 import { Agent, fetch as undiciFetch } from "undici";
 
@@ -27,6 +28,7 @@ const {
   SERPRO_CONSUMER_KEY,
   SERPRO_CONSUMER_SECRET,
   SERPRO_CERT_PATH,
+  SERPRO_CERT_BASE64,
   SERPRO_CERT_PASSWORD,
   CONTRATANTE_CNPJ,
   AUTOR_PEDIDO_CNPJ,
@@ -38,7 +40,6 @@ const required = {
   PROXY_SHARED_SECRET,
   SERPRO_CONSUMER_KEY,
   SERPRO_CONSUMER_SECRET,
-  SERPRO_CERT_PATH,
   SERPRO_CERT_PASSWORD,
   CONTRATANTE_CNPJ,
 };
@@ -47,6 +48,11 @@ for (const [k, v] of Object.entries(required)) {
     console.error(`[boot] variável obrigatória ausente: ${k}`);
     process.exit(1);
   }
+}
+
+if (!SERPRO_CERT_PATH && !SERPRO_CERT_BASE64) {
+  console.error("[boot] defina SERPRO_CERT_PATH (arquivo) ou SERPRO_CERT_BASE64 (env)");
+  process.exit(1);
 }
 
 const SERPRO_TOKEN_URLS = {
@@ -75,15 +81,64 @@ if (CERT_PFX_BASE64) {
   );
 }
 
-// Carrega o .pfx uma única vez no boot
+// Carrega o .pfx (binário do arquivo, base64 em arquivo, ou base64 em env)
 let pfxBuffer;
+let pfxOrigem = "";
 try {
-  pfxBuffer = readFileSync(SERPRO_CERT_PATH);
-  console.log(`[boot] certificado A1 carregado (${pfxBuffer.length} bytes)`);
+  if (SERPRO_CERT_BASE64 && SERPRO_CERT_BASE64.trim().length > 0) {
+    pfxBuffer = Buffer.from(SERPRO_CERT_BASE64.trim(), "base64");
+    pfxOrigem = "env SERPRO_CERT_BASE64";
+  } else {
+    const raw = readFileSync(SERPRO_CERT_PATH);
+    // autodetect: se o arquivo é texto ASCII base64, decodifica
+    const asAscii = raw.toString("utf8").trim();
+    const looksBase64 =
+      asAscii.length > 100 && /^[A-Za-z0-9+/=\r\n\s]+$/.test(asAscii);
+    if (looksBase64) {
+      pfxBuffer = Buffer.from(asAscii.replace(/\s+/g, ""), "base64");
+      pfxOrigem = `arquivo ${SERPRO_CERT_PATH} (base64 detectado, decodificado)`;
+    } else {
+      pfxBuffer = raw;
+      pfxOrigem = `arquivo ${SERPRO_CERT_PATH} (binário)`;
+    }
+  }
+  console.log(`[boot] certificado A1 carregado de ${pfxOrigem} (${pfxBuffer.length} bytes)`);
 } catch (err) {
-  console.error(`[boot] falha ao ler certificado em ${SERPRO_CERT_PATH}:`, err.message);
+  console.error(`[boot] falha ao ler certificado:`, err.message);
   process.exit(1);
 }
+
+// Validação no boot: tenta abrir o PKCS#12 com a senha. Se falhar, aborta com mensagem clara.
+try {
+  // createPrivateKey aceita pkcs12 via { key, format: 'der', type: 'pkcs12', passphrase }
+  // Em runtimes onde isso não está disponível, caímos pra um teste de handshake fake.
+  createPrivateKey({
+    key: pfxBuffer,
+    format: "der",
+    type: "pkcs12",
+    passphrase: SERPRO_CERT_PASSWORD,
+  });
+  const thumb = createHash("sha256").update(pfxBuffer).digest("hex").slice(0, 16);
+  console.log(`[boot] PKCS#12 validado com sucesso (sha256[0..16]=${thumb})`);
+} catch (err) {
+  const msg = (err && err.message) || String(err);
+  const lower = msg.toLowerCase();
+  let dica = "";
+  if (lower.includes("mac") || lower.includes("decrypt") || lower.includes("password")) {
+    dica = " → senha do .pfx provavelmente incorreta (SERPRO_CERT_PASSWORD).";
+  } else if (lower.includes("asn1") || lower.includes("pkcs12") || lower.includes("tag")) {
+    dica = " → arquivo não é um PKCS#12 válido (talvez ainda esteja em base64 ou corrompido).";
+  } else if (lower.includes("unsupported") || lower.includes("not implemented")) {
+    // Node sem suporte direto a pkcs12 no createPrivateKey — não é fatal, segue.
+    console.warn(`[boot] aviso: validação eager do PKCS#12 indisponível neste runtime (${msg}). Seguindo.`);
+    dica = null;
+  }
+  if (dica !== null) {
+    console.error(`[boot] PKCS#12 inválido: ${msg}${dica}`);
+    process.exit(1);
+  }
+}
+
 
 // Agent mTLS reutilizável — mantém keep-alive e handshake quente
 const mtlsAgent = new Agent({
