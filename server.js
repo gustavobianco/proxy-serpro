@@ -312,7 +312,34 @@ app.post("/serpro/consultar", async (req, res) => {
       "Content-Type": "application/json",
       Accept: "application/json",
     };
-    if (jwt) headers.jwt_token = jwt;
+    if (jwt) {
+      const jwtLimpo = String(jwt).trim().replace(/^Bearer\s+/i, "");
+
+      const partes = jwtLimpo.split(".");
+      if (partes.length !== 3) {
+        return res.status(400).json({
+          ok: false,
+          error: "jwt inválido: esperado formato header.payload.signature (3 partes separadas por '.')",
+        });
+      }
+
+      try {
+        const payloadJwt = JSON.parse(Buffer.from(partes[1], "base64url").toString("utf8"));
+        if (payloadJwt.exp && payloadJwt.exp * 1000 < Date.now()) {
+          return res.status(400).json({
+            ok: false,
+            error: `jwt expirado em ${new Date(payloadJwt.exp * 1000).toISOString()}`,
+          });
+        }
+      } catch {
+        return res.status(400).json({ ok: false, error: "jwt com payload não decodificável" });
+      }
+
+      const preview = `${jwtLimpo.slice(0, 8)}…${jwtLimpo.slice(-8)}`;
+      console.log(`[/serpro/consultar] jwt_token presente (len=${jwtLimpo.length}, preview=${preview})`);
+
+      headers.jwt_token = jwtLimpo;
+    }
 
     // Chamada com mTLS via undici Agent
     let integraResp;
@@ -348,6 +375,11 @@ app.post("/serpro/consultar", async (req, res) => {
       integraJson = null;
     }
 
+    const dica =
+      !integraResp.ok && integraResp.status === 403 && integraText.includes("jwt_token")
+        ? "JWT de procuração inválido ou expirado — verifique expiração, ambiente e claims do token SERPRO"
+        : undefined;
+
     return res.json({
       ok: integraResp.ok,
       http_status: integraResp.status,
@@ -355,6 +387,7 @@ app.post("/serpro/consultar", async (req, res) => {
       duracao_ms: Date.now() - inicio,
       stage: "ok",
       payload: integraJson ?? { raw: integraText },
+      ...(dica ? { diagnostico: dica } : {}),
     });
   } catch (err) {
     const detalhes = extrairDetalhesErro(err);
