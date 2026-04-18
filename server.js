@@ -16,9 +16,8 @@
 
 import "dotenv/config";
 import express from "express";
-import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { dirname } from "node:path";
 import { Agent, fetch as undiciFetch } from "undici";
 import forge from "node-forge";
 
@@ -33,7 +32,6 @@ const {
   SERPRO_CERT_PASSWORD,
   CONTRATANTE_CNPJ,
   AUTOR_PEDIDO_CNPJ,
-  CERT_PFX_BASE64,
 } = process.env;
 
 // Validação eager das variáveis críticas — falha rápido no boot
@@ -50,7 +48,6 @@ for (const [k, v] of Object.entries(required)) {
     process.exit(1);
   }
 }
-
 if (!SERPRO_CERT_PATH && !SERPRO_CERT_BASE64) {
   console.error("[boot] defina SERPRO_CERT_PATH (arquivo) ou SERPRO_CERT_BASE64 (env)");
   process.exit(1);
@@ -66,21 +63,6 @@ const SERPRO_INTEGRA_URLS = {
   demonstracao: "https://apigateway.serpro.gov.br/integra-contador-demonstracao/v1/Consultar",
   producao: "https://gateway.apiserpro.serpro.gov.br/integra-contador/v1/Consultar",
 };
-
-// Se CERT_PFX_BASE64 estiver definida, grava o .pfx no disco antes de ler.
-// Isso permite injetar o certificado via variável de ambiente sem depender
-// de upload manual para o Volume.
-if (CERT_PFX_BASE64) {
-  const certDir = dirname(SERPRO_CERT_PATH);
-  if (!existsSync(certDir)) {
-    mkdirSync(certDir, { recursive: true });
-  }
-  writeFileSync(SERPRO_CERT_PATH, Buffer.from(CERT_PFX_BASE64, "base64"));
-  chmodSync(SERPRO_CERT_PATH, 0o600);
-  console.log(
-    `[boot] cert.pfx gravado em ${SERPRO_CERT_PATH} (${statSync(SERPRO_CERT_PATH).size} bytes)`,
-  );
-}
 
 // Carrega o .pfx (binário do arquivo, base64 em arquivo, ou base64 em env)
 let pfxBuffer;
@@ -330,40 +312,10 @@ app.post("/serpro/consultar", async (req, res) => {
 
     // Integra Contador exige SEMPRE os dois headers (Bearer + jwt_token).
     // Por padrão usamos o jwt_token devolvido pelo OAuth. Se o body trouxer
-    // `jwt` (procuração específica do plano com_procuracoes), ele substitui
-    // após validação de formato e expiração.
-    let jwtFinal = jwtToken;
-    if (jwt) {
-      const jwtLimpo = String(jwt).trim().replace(/^Bearer\s+/i, "");
-
-      const partes = jwtLimpo.split(".");
-      if (partes.length !== 3) {
-        return res.status(400).json({
-          ok: false,
-          error: "jwt inválido: esperado formato header.payload.signature (3 partes separadas por '.')",
-        });
-      }
-
-      try {
-        const payloadJwt = JSON.parse(Buffer.from(partes[1], "base64url").toString("utf8"));
-        if (payloadJwt.exp && payloadJwt.exp * 1000 < Date.now()) {
-          return res.status(400).json({
-            ok: false,
-            error: `jwt expirado em ${new Date(payloadJwt.exp * 1000).toISOString()}`,
-          });
-        }
-      } catch {
-        return res.status(400).json({ ok: false, error: "jwt com payload não decodificável" });
-      }
-
-      const preview = `${jwtLimpo.slice(0, 8)}…${jwtLimpo.slice(-8)}`;
-      console.log(`[/serpro/consultar] jwt_token override via body (len=${jwtLimpo.length}, preview=${preview})`);
-      jwtFinal = jwtLimpo;
-    }
-
+    // `jwt` (procuração específica do plano com_procuracoes), ele substitui.
     const headers = {
       Authorization: `Bearer ${accessToken}`,
-      jwt_token: jwtFinal,
+      jwt_token: jwt || jwtToken,
       "Content-Type": "application/json",
       Accept: "application/json",
     };
@@ -402,11 +354,6 @@ app.post("/serpro/consultar", async (req, res) => {
       integraJson = null;
     }
 
-    const dica =
-      !integraResp.ok && integraResp.status === 403 && integraText.includes("jwt_token")
-        ? "JWT de procuração inválido ou expirado — verifique expiração, ambiente e claims do token SERPRO"
-        : undefined;
-
     return res.json({
       ok: integraResp.ok,
       http_status: integraResp.status,
@@ -414,7 +361,6 @@ app.post("/serpro/consultar", async (req, res) => {
       duracao_ms: Date.now() - inicio,
       stage: "ok",
       payload: integraJson ?? { raw: integraText },
-      ...(dica ? { diagnostico: dica } : {}),
     });
   } catch (err) {
     const detalhes = extrairDetalhesErro(err);
