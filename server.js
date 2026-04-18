@@ -53,10 +53,13 @@ if (!SERPRO_CERT_PATH && !SERPRO_CERT_BASE64) {
   process.exit(1);
 }
 
+// Endpoint /authenticate do Integra Contador (devolve access_token + jwt_token).
+// Diferente do /token genérico do gateway que só devolve access_token.
+// Exige mTLS (mesmo certificado A1 usado nas chamadas ao Integra Contador).
 const SERPRO_TOKEN_URLS = {
-  trial: "https://gateway.apiserpro.serpro.gov.br/token",
-  demonstracao: "https://apigateway.serpro.gov.br/token",
-  producao: "https://gateway.apiserpro.serpro.gov.br/token",
+  trial: "https://autenticacao.sapi.serpro.gov.br/authenticate",
+  demonstracao: "https://autenticacao.sapi.serpro.gov.br/authenticate",
+  producao: "https://autenticacao.sapi.serpro.gov.br/authenticate",
 };
 const SERPRO_INTEGRA_URLS = {
   trial: "https://gateway.apiserpro.serpro.gov.br/integra-contador-trial/v1/Consultar",
@@ -199,14 +202,15 @@ async function obterAccessToken() {
     `${SERPRO_CONSUMER_KEY}:${SERPRO_CONSUMER_SECRET}`,
   ).toString("base64");
 
-  // OAuth não exige mTLS — usa fetch normal
-  const resp = await fetch(url, {
+  // /authenticate exige mTLS (mesmo certificado A1) — usa undiciFetch com dispatcher
+  const resp = await undiciFetch(url, {
     method: "POST",
     headers: {
       Authorization: `Basic ${basic}`,
       "Content-Type": "application/x-www-form-urlencoded",
     },
     body: "grant_type=client_credentials",
+    dispatcher: mtlsAgent,
   });
   const text = await resp.text();
   if (!resp.ok) {
