@@ -17,9 +17,10 @@
 import "dotenv/config";
 import express from "express";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, statSync } from "node:fs";
-import { createHash, createPrivateKey } from "node:crypto";
+import { createHash } from "node:crypto";
 import { dirname } from "node:path";
 import { Agent, fetch as undiciFetch } from "undici";
+import forge from "node-forge";
 
 const {
   PORT = "3000",
@@ -108,35 +109,37 @@ try {
   process.exit(1);
 }
 
-// Validação no boot: tenta abrir o PKCS#12 com a senha. Se falhar, aborta com mensagem clara.
+// Validação no boot via node-forge (puro JS, funciona em qualquer Node).
+// Tenta parsear o PKCS#12 com a senha — se falhar, aborta com mensagem clara.
 try {
-  // createPrivateKey aceita pkcs12 via { key, format: 'der', type: 'pkcs12', passphrase }
-  // Em runtimes onde isso não está disponível, caímos pra um teste de handshake fake.
-  createPrivateKey({
-    key: pfxBuffer,
-    format: "der",
-    type: "pkcs12",
-    passphrase: SERPRO_CERT_PASSWORD,
-  });
+  const p12Der = pfxBuffer.toString("binary");
+  const p12Asn1 = forge.asn1.fromDer(p12Der);
+  forge.pkcs12.pkcs12FromAsn1(p12Asn1, SERPRO_CERT_PASSWORD);
   const thumb = createHash("sha256").update(pfxBuffer).digest("hex").slice(0, 16);
   console.log(`[boot] PKCS#12 validado com sucesso (sha256[0..16]=${thumb})`);
 } catch (err) {
-  const msg = (err && err.message) || String(err);
+  const msg = (err && (err.message || err.toString())) || String(err);
   const lower = msg.toLowerCase();
   let dica = "";
-  if (lower.includes("mac") || lower.includes("decrypt") || lower.includes("password")) {
-    dica = " → senha do .pfx provavelmente incorreta (SERPRO_CERT_PASSWORD).";
-  } else if (lower.includes("asn1") || lower.includes("pkcs12") || lower.includes("tag")) {
-    dica = " → arquivo não é um PKCS#12 válido (talvez ainda esteja em base64 ou corrompido).";
-  } else if (lower.includes("unsupported") || lower.includes("not implemented")) {
-    // Node sem suporte direto a pkcs12 no createPrivateKey — não é fatal, segue.
-    console.warn(`[boot] aviso: validação eager do PKCS#12 indisponível neste runtime (${msg}). Seguindo.`);
-    dica = null;
+  if (
+    lower.includes("pkcs12mac") ||
+    lower.includes("mac could not be verified") ||
+    lower.includes("invalid password") ||
+    lower.includes("mac verify") ||
+    lower.includes("bad decrypt")
+  ) {
+    dica = " → senha do .pfx incorreta (confira SERPRO_CERT_PASSWORD no Railway).";
+  } else if (
+    lower.includes("asn.1") ||
+    lower.includes("asn1") ||
+    lower.includes("too few bytes") ||
+    lower.includes("invalid tag") ||
+    lower.includes("der")
+  ) {
+    dica = " → arquivo não é um PKCS#12 válido (talvez ainda esteja em base64, truncado ou corrompido).";
   }
-  if (dica !== null) {
-    console.error(`[boot] PKCS#12 inválido: ${msg}${dica}`);
-    process.exit(1);
-  }
+  console.error(`[boot] PKCS#12 inválido: ${msg}${dica}`);
+  process.exit(1);
 }
 
 
