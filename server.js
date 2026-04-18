@@ -109,14 +109,48 @@ try {
   process.exit(1);
 }
 
-// Validação no boot via node-forge (puro JS, funciona em qualquer Node).
-// Tenta parsear o PKCS#12 com a senha — se falhar, aborta com mensagem clara.
+// Validação + extração de key/cert PEM via node-forge.
+// Motivo: Node 18+/OpenSSL 3 rejeita PKCS#12 com algoritmos legados
+// (RC2-40, 3DES-SHA1) usados em certificados A1 brasileiros, com erro
+// "Unsupported PKCS12 PFX data". node-forge é puro JS e aceita esses
+// algoritmos, então convertemos para PEM e passamos key+cert ao undici.
+let pemKey = null;
+let pemCert = null;
+let pemCa = [];
 try {
   const p12Der = pfxBuffer.toString("binary");
   const p12Asn1 = forge.asn1.fromDer(p12Der);
-  forge.pkcs12.pkcs12FromAsn1(p12Asn1, SERPRO_CERT_PASSWORD);
+  const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, SERPRO_CERT_PASSWORD);
+  // extrai chave privada (PKCS#8 shrouded ou keyBag)
+  const keyBags = p12.getBags({ bagType: forge.pki.oids.pkcs8ShroudedKeyBag });
+  let keyObj = keyBags[forge.pki.oids.pkcs8ShroudedKeyBag]?.[0]?.key;
+  if (!keyObj) {
+    const plainKeyBags = p12.getBags({ bagType: forge.pki.oids.keyBag });
+    keyObj = plainKeyBags[forge.pki.oids.keyBag]?.[0]?.key;
+  }
+  if (!keyObj) throw new Error("nenhuma chave privada encontrada no PKCS#12");
+  // extrai certificados
+  const certBags = p12.getBags({ bagType: forge.pki.oids.certBag });
+  const certs = (certBags[forge.pki.oids.certBag] ?? []).map((b) => b.cert);
+  if (certs.length === 0) throw new Error("nenhum certificado encontrado no PKCS#12");
+  // heurística: o cert do titular tem a chave pública correspondente à privada;
+  // o resto é cadeia (CA intermediária + raiz)
+  const pubKeyPem = forge.pki.publicKeyToPem(forge.pki.setRsaPublicKey(keyObj.n, keyObj.e));
+  const titular = certs.find(
+    (c) => forge.pki.publicKeyToPem(c.publicKey) === pubKeyPem,
+  ) ?? certs[0];
+  const cadeia = certs.filter((c) => c !== titular);
+  pemKey = forge.pki.privateKeyToPem(keyObj);
+  pemCert = forge.pki.certificateToPem(titular);
+  pemCa = cadeia.map((c) => forge.pki.certificateToPem(c));
+
   const thumb = createHash("sha256").update(pfxBuffer).digest("hex").slice(0, 16);
-  console.log(`[boot] PKCS#12 validado com sucesso (sha256[0..16]=${thumb})`);
+  const cn = titular.subject.getField("CN")?.value ?? "?";
+  const validade = titular.validity.notAfter.toISOString().slice(0, 10);
+  console.log(
+    `[boot] PKCS#12 validado e convertido para PEM ` +
+      `(sha256[0..16]=${thumb}, CN="${cn}", validade=${validade}, cadeia=${cadeia.length})`,
+  );
 } catch (err) {
   const msg = (err && (err.message || err.toString())) || String(err);
   const lower = msg.toLowerCase();
@@ -143,12 +177,15 @@ try {
 }
 
 
-// Agent mTLS reutilizável — mantém keep-alive e handshake quente
+// Agent mTLS reutilizável — mantém keep-alive e handshake quente.
+// Usamos key+cert PEM (não pfx) para contornar a restrição do OpenSSL 3
+// que rejeita os algoritmos legados dos certificados A1 brasileiros
+// (erro "Unsupported PKCS12 PFX data" / ERR_CRYPTO_UNSUPPORTED_OPERATION).
 const mtlsAgent = new Agent({
   connect: {
-    pfx: pfxBuffer,
-    passphrase: SERPRO_CERT_PASSWORD,
-  },
+    key: pemKey,
+    cert: pemCert,
+    ...(pemCa.length > 0 ? { ca: pemCa } : {}),  },
 });
 
 // Cache simples de access_token em memória (proxy é single-instance)
@@ -377,6 +414,9 @@ function extrairDetalhesErro(err) {
  */
 function classificarErroMtls(detalhes) {
   const blob = JSON.stringify(detalhes).toLowerCase();
+  if (blob.includes("unsupported pkcs12") || blob.includes("err_crypto_unsupported_operation")) {
+  return "OpenSSL 3 rejeitou o PKCS#12 (algoritmo legado). O proxy já converte para PEM no boot — se está vendo isso, o redeploy ainda não pegou a versão nova.";
+  }
   if (blob.includes("mac verify") || blob.includes("bad decrypt") || blob.includes("wrong password")) {
     return "Senha do .pfx incorreta — confira SERPRO_CERT_PASSWORD no Railway.";
   }
