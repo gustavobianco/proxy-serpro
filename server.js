@@ -61,11 +61,23 @@ const SERPRO_TOKEN_URLS = {
   demonstracao: "https://autenticacao.sapi.serpro.gov.br/authenticate",
   producao: "https://autenticacao.sapi.serpro.gov.br/authenticate",
 };
-const SERPRO_INTEGRA_URLS = {
-  trial: "https://gateway.apiserpro.serpro.gov.br/integra-contador-trial/v1/Consultar",
-  demonstracao: "https://apigateway.serpro.gov.br/integra-contador-demonstracao/v1/Consultar",
-  producao: "https://gateway.apiserpro.serpro.gov.br/integra-contador/v1/Consultar",
+// Cada operação do Integra Contador tem um endpoint próprio:
+//   - /v1/Consultar  → serviços do tipo CONSULTAR (CONSULTIMADECREC14 etc.)
+//   - /v1/Apoiar     → serviços do tipo APOIAR (GERARDAS12, SOLICITARPARCELAMENTO, etc.)
+//   - /v1/Declarar   → serviços do tipo DECLARAR (TRANSDECLARACAO11)
+//   - /v1/Emitir     → serviços do tipo EMITIR (alguns DARFs)
+// O gateway valida o tipo por endpoint e devolve 403 [AcessoNegado-ICGERENCIADOR-017]
+// quando o id_servico não bate com o tipo do endpoint.
+const SERPRO_BASE_URLS = {
+  trial: "https://gateway.apiserpro.serpro.gov.br/integra-contador-trial/v1",
+  demonstracao: "https://apigateway.serpro.gov.br/integra-contador-demonstracao/v1",
+  producao: "https://gateway.apiserpro.serpro.gov.br/integra-contador/v1",
 };
+function urlServico(operacao) {
+  const base = SERPRO_BASE_URLS[SERPRO_AMBIENTE];
+  if (!base) return null;
+  return `${base}/${operacao}`;
+}
 
 // Carrega o .pfx (binário do arquivo, base64 em arquivo, ou base64 em env)
 let pfxBuffer;
@@ -255,137 +267,145 @@ app.get("/healthz", (_req, res) => {
 });
 
 /**
- * POST /serpro/consultar
- * Body: { cliente_cnpj: string, competencia: string (YYYYMM), jwt?: string,
- *         id_sistema?: string, id_servico?: string, dados?: object }
+ * Factory de handler genérico — recebe a operação SERPRO ("Consultar",
+ * "Apoiar", "Declarar", "Emitir") e devolve um Express handler que
+ * encaminha o pedido para o endpoint correspondente do Integra Contador.
  *
- * Default = PGDASD/CONSULTIMADECREC14 (consulta declarações por período).
+ * Body esperado: { cliente_cnpj, competencia (YYYYMM), jwt?,
+ *                  id_sistema?, id_servico?, versao_sistema?, dados? }
  */
-app.post("/serpro/consultar", async (req, res) => {
-  const inicio = Date.now();
-  try {
-    const {
-      cliente_cnpj,
-      competencia,
-      jwt,
-      id_sistema = "PGDASD",
-      id_servico = "CONSULTIMADECREC14",
-      versao_sistema = "1.0",
-      dados,
-    } = req.body ?? {};
-
-    if (!cliente_cnpj || !competencia) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "cliente_cnpj e competencia são obrigatórios" });
-    }
-    const cnpjLimpo = String(cliente_cnpj).replace(/\D/g, "");
-    if (cnpjLimpo.length !== 14) {
-      return res.status(400).json({ ok: false, error: "cliente_cnpj inválido" });
-    }
-    const competenciaSerpro = String(competencia).replace(/\D/g, "");
-    if (!/^\d{6}$/.test(competenciaSerpro)) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "competencia inválida (esperado YYYYMM)" });
-    }
-
-    const { accessToken, jwtToken } = await obterAccessToken();
-    const integraUrl = SERPRO_INTEGRA_URLS[SERPRO_AMBIENTE];
-    if (!integraUrl) {
-      return res.status(500).json({ ok: false, error: `Ambiente inválido: ${SERPRO_AMBIENTE}` });
-    }
-
-    const contratanteCnpj = CONTRATANTE_CNPJ.replace(/\D/g, "");
-    const autorCnpj = (AUTOR_PEDIDO_CNPJ ?? CONTRATANTE_CNPJ).replace(/\D/g, "");
-
-    const dadosPayload =
-      dados !== undefined
-        ? typeof dados === "string"
-          ? dados
-          : JSON.stringify(dados)
-        : JSON.stringify({ periodoApuracao: Number(competenciaSerpro) });
-
-    const payload = {
-      contratante: { numero: contratanteCnpj, tipo: 2 },
-      autorPedidoDados: { numero: autorCnpj, tipo: 2 },
-      contribuinte: { numero: cnpjLimpo, tipo: 2 },
-      pedidoDados: {
-        idSistema: id_sistema,
-        idServico: id_servico,
-        versaoSistema: versao_sistema,
-        dados: dadosPayload,
-      },
-    };
-
-    // Integra Contador exige SEMPRE os dois headers (Bearer + jwt_token).
-    // Por padrão usamos o jwt_token devolvido pelo OAuth. Se o body trouxer
-    // `jwt` (procuração específica do plano com_procuracoes), ele substitui.
-    const headers = {
-      Authorization: `Bearer ${accessToken}`,
-      jwt_token: jwt || jwtToken,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    };
-
-    // Chamada com mTLS via undici Agent
-    let integraResp;
+function montarHandler(operacao) {
+  const tag = `[/serpro/${operacao.toLowerCase()}]`;
+  return async (req, res) => {
+    const inicio = Date.now();
     try {
-      integraResp = await undiciFetch(integraUrl, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(payload),
-        dispatcher: mtlsAgent,
+      const {
+        cliente_cnpj,
+        competencia,
+        jwt,
+        id_sistema = "PGDASD",
+        id_servico = "CONSULTIMADECREC14",
+        versao_sistema = "1.0",
+        dados,
+      } = req.body ?? {};
+
+      if (!cliente_cnpj || !competencia) {
+        return res
+          .status(400)
+          .json({ ok: false, error: "cliente_cnpj e competencia são obrigatórios" });
+      }
+      const cnpjLimpo = String(cliente_cnpj).replace(/\D/g, "");
+      if (cnpjLimpo.length !== 14) {
+        return res.status(400).json({ ok: false, error: "cliente_cnpj inválido" });
+      }
+      const competenciaSerpro = String(competencia).replace(/\D/g, "");
+      if (!/^\d{6}$/.test(competenciaSerpro)) {
+        return res
+          .status(400)
+          .json({ ok: false, error: "competencia inválida (esperado YYYYMM)" });
+      }
+
+      const { accessToken, jwtToken } = await obterAccessToken();
+      const integraUrl = urlServico(operacao);
+      if (!integraUrl) {
+        return res
+          .status(500)
+          .json({ ok: false, error: `Ambiente inválido: ${SERPRO_AMBIENTE}` });
+      }
+
+      const contratanteCnpj = CONTRATANTE_CNPJ.replace(/\D/g, "");
+      const autorCnpj = (AUTOR_PEDIDO_CNPJ ?? CONTRATANTE_CNPJ).replace(/\D/g, "");
+
+      const dadosPayload =
+        dados !== undefined
+          ? typeof dados === "string"
+            ? dados
+            : JSON.stringify(dados)
+          : JSON.stringify({ periodoApuracao: Number(competenciaSerpro) });
+
+      const payload = {
+        contratante: { numero: contratanteCnpj, tipo: 2 },
+        autorPedidoDados: { numero: autorCnpj, tipo: 2 },
+        contribuinte: { numero: cnpjLimpo, tipo: 2 },
+        pedidoDados: {
+          idSistema: id_sistema,
+          idServico: id_servico,
+          versaoSistema: versao_sistema,
+          dados: dadosPayload,
+        },
+      };
+
+      const headers = {
+        Authorization: `Bearer ${accessToken}`,
+        jwt_token: jwt || jwtToken,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      };
+
+      let integraResp;
+      try {
+        integraResp = await undiciFetch(integraUrl, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(payload),
+          dispatcher: mtlsAgent,
+        });
+      } catch (fetchErr) {
+        const detalhes = extrairDetalhesErro(fetchErr);
+        console.error(`${tag} falha mTLS upstream:`, detalhes);
+        return res.status(502).json({
+          ok: false,
+          http_status: null,
+          ambiente: SERPRO_AMBIENTE,
+          duracao_ms: Date.now() - inicio,
+          stage: "mtls_upstream",
+          error: detalhes.mensagem,
+          error_name: detalhes.name,
+          error_code: detalhes.code,
+          error_cause: detalhes.cause,
+          diagnostico: classificarErroMtls(detalhes),
+        });
+      }
+      const integraText = await integraResp.text();
+      let integraJson = null;
+      try {
+        integraJson = JSON.parse(integraText);
+      } catch {
+        integraJson = null;
+      }
+
+      return res.json({
+        ok: integraResp.ok,
+        http_status: integraResp.status,
+        ambiente: SERPRO_AMBIENTE,
+        duracao_ms: Date.now() - inicio,
+        stage: "ok",
+        operacao,
+        payload: integraJson ?? { raw: integraText },
       });
-    } catch (fetchErr) {
-      // Falha de transporte/handshake — extrai todos os detalhes possíveis
-      const detalhes = extrairDetalhesErro(fetchErr);
-      console.error("[/serpro/consultar] falha mTLS upstream:", detalhes);
-      return res.status(502).json({
+    } catch (err) {
+      const detalhes = extrairDetalhesErro(err);
+      console.error(`${tag} erro:`, detalhes);
+      return res.status(500).json({
         ok: false,
         http_status: null,
         ambiente: SERPRO_AMBIENTE,
         duracao_ms: Date.now() - inicio,
-        stage: "mtls_upstream",
+        stage: "internal",
         error: detalhes.mensagem,
         error_name: detalhes.name,
         error_code: detalhes.code,
         error_cause: detalhes.cause,
-        diagnostico: classificarErroMtls(detalhes),
       });
     }
-    const integraText = await integraResp.text();
-    let integraJson = null;
-    try {
-      integraJson = JSON.parse(integraText);
-    } catch {
-      integraJson = null;
-    }
+  };
+}
 
-    return res.json({
-      ok: integraResp.ok,
-      http_status: integraResp.status,
-      ambiente: SERPRO_AMBIENTE,
-      duracao_ms: Date.now() - inicio,
-      stage: "ok",
-      payload: integraJson ?? { raw: integraText },
-    });
-  } catch (err) {
-    const detalhes = extrairDetalhesErro(err);
-    console.error("[/serpro/consultar] erro:", detalhes);
-    return res.status(500).json({
-      ok: false,
-      http_status: null,
-      ambiente: SERPRO_AMBIENTE,
-      duracao_ms: Date.now() - inicio,
-      stage: "internal",
-      error: detalhes.mensagem,
-      error_name: detalhes.name,
-      error_code: detalhes.code,
-      error_cause: detalhes.cause,
-    });
-  }
-});
+// Endpoints por tipo de operação SERPRO Integra Contador.
+app.post("/serpro/consultar", montarHandler("Consultar"));
+app.post("/serpro/apoiar", montarHandler("Apoiar"));
+app.post("/serpro/declarar", montarHandler("Declarar"));
+app.post("/serpro/emitir", montarHandler("Emitir"));
 
 /**
  * Achata um Error (incluindo err.cause de undici) em campos serializáveis.
