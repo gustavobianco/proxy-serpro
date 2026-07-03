@@ -1,6 +1,6 @@
 {
   "name": "serpro-mtls-proxy",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Proxy mTLS multi-tenant para chamadas Integra Contador SERPRO e Web Services de Consulta/Download de eventos do eSocial. Carrega o certificado A1 (.pfx) por escritorio_id sob demanda (cache LRU), usando Lovable Cloud (Supabase) como fonte.",
   "type": "module",
   "main": "server.js",

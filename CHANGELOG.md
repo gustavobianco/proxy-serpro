@@ -12,6 +12,31 @@ Convenção: [SemVer](https://semver.org/lang/pt-BR/).
 
 ---
 
+## 2.2.0 — modo local com interface gráfica
+
+### Adicionado
+- **Modo LOCAL**: com `LOCAL_CERT_PATH` + `LOCAL_CERT_SENHA` no `.env`, o
+  proxy roda 100% na máquina do escritório — certificado A1 lido de
+  arquivo no disco (`lib/certificadoLocal.js`), sem Railway, sem Supabase,
+  sem nenhuma outra variável obrigatória. Voltado a quem só quer o
+  baixador de eventos do eSocial.
+- **Interface gráfica** (`public/index.html`), servida em `/` no modo
+  local: consulta eventos por CNPJ/tipo/período, lista com seleção e
+  baixa os XMLs pelo navegador. Tema claro/escuro automático.
+- `/healthz` ganhou o campo `modo` (`local` | `multi-tenant`) e, no modo
+  local, `cert_local` (titular, CNPJ, validade, thumbprint).
+
+### Comportamento no modo local
+- Servidor escuta só em `127.0.0.1` (sobrescreva com `HOST` se precisar).
+- `PROXY_SHARED_SECRET` é opcional; sem ele, a auth é dispensada (o
+  servidor não é acessível de fora da máquina).
+- Rotas `/serpro/*` respondem `501` (dependem das credenciais SERPRO,
+  que o modo local não exige).
+- Boot falha imediatamente com mensagem amigável se o `.pfx` não existir,
+  a senha estiver errada ou o certificado estiver vencido.
+
+---
+
 ## 2.1.0 — download de eventos do eSocial
 
 ### Adicionado

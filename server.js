@@ -37,6 +37,7 @@
 import "dotenv/config";
 import express from "express";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { fetch as undiciFetch } from "undici";
 import {
   obterContextoMtls,
@@ -44,6 +45,7 @@ import {
   snapshotCache,
   CertificadoError,
 } from "./lib/certificadoEscritorio.js";
+import { carregarContextoLocal } from "./lib/certificadoLocal.js";
 import {
   consultarIdentificadoresEventosEmpregador,
   solicitarDownloadEventosPorId,
@@ -59,6 +61,7 @@ import {
 
 const {
   PORT = "3000",
+  HOST,
   PROXY_SHARED_SECRET,
   SERPRO_AMBIENTE = "producao",
   SERPRO_CONSUMER_KEY,
@@ -68,21 +71,43 @@ const {
   SUPABASE_URL,
   SUPABASE_SERVICE_ROLE_KEY,
   CERT_ENCRYPTION_KEY,
+  LOCAL_CERT_PATH,
+  LOCAL_CERT_SENHA,
 } = process.env;
 
-const required = {
-  PROXY_SHARED_SECRET,
-  SERPRO_CONSUMER_KEY,
-  SERPRO_CONSUMER_SECRET,
-  CONTRATANTE_CNPJ,
-  SUPABASE_URL,
-  SUPABASE_SERVICE_ROLE_KEY,
-  CERT_ENCRYPTION_KEY,
-};
-for (const [k, v] of Object.entries(required)) {
-  if (!v) {
-    console.error(`[boot] variável obrigatória ausente: ${k}`);
+// MODO LOCAL: certificado A1 lido de arquivo no disco, sem Supabase.
+// Ativa quando LOCAL_CERT_PATH + LOCAL_CERT_SENHA estão no .env. Nesse modo
+// nenhuma outra variável é obrigatória, a interface web é servida em "/" e
+// o servidor só escuta em 127.0.0.1 (a menos que HOST diga o contrário).
+const MODO_LOCAL = Boolean(LOCAL_CERT_PATH && LOCAL_CERT_SENHA);
+
+let entryLocal = null;
+if (MODO_LOCAL) {
+  try {
+    entryLocal = carregarContextoLocal({ certPath: LOCAL_CERT_PATH, senha: LOCAL_CERT_SENHA });
+    console.log(
+      `[boot] modo LOCAL: certificado carregado — titular="${entryLocal.titularNome ?? "?"}" ` +
+        `cnpj=${entryLocal.titularCnpj ?? "?"} validade=${entryLocal.validadeEm?.slice(0, 10) ?? "?"}`,
+    );
+  } catch (err) {
+    console.error(`[boot] ${err.message}`);
     process.exit(1);
+  }
+} else {
+  const required = {
+    PROXY_SHARED_SECRET,
+    SERPRO_CONSUMER_KEY,
+    SERPRO_CONSUMER_SECRET,
+    CONTRATANTE_CNPJ,
+    SUPABASE_URL,
+    SUPABASE_SERVICE_ROLE_KEY,
+    CERT_ENCRYPTION_KEY,
+  };
+  for (const [k, v] of Object.entries(required)) {
+    if (!v) {
+      console.error(`[boot] variável obrigatória ausente: ${k}`);
+      process.exit(1);
+    }
   }
 }
 
@@ -115,6 +140,18 @@ function extrairEscritorioIdOuFalhar(req, res) {
     return null;
   }
   return escritorio_id;
+}
+
+/**
+ * Resolve o contexto mTLS para as rotas /esocial/*: em modo local devolve
+ * o certificado do arquivo (escritorio_id é ignorado); em modo multi-tenant
+ * valida escritorio_id e busca no Supabase. Devolve null se já respondeu 400.
+ */
+async function resolverEntryEsocial(req, res) {
+  if (MODO_LOCAL) return entryLocal;
+  const escritorio_id = extrairEscritorioIdOuFalhar(req, res);
+  if (!escritorio_id) return null;
+  return obterContextoMtls(escritorio_id);
 }
 
 /** Resumo do certificado ativo do escritório, incluído nas respostas para auditoria. */
@@ -175,8 +212,11 @@ async function obterAccessToken(entry) {
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
-// Auth shared-secret obrigatória nas rotas /serpro/* e /esocial/*
+// Auth shared-secret obrigatória nas rotas /serpro/* e /esocial/*.
+// Em modo local sem PROXY_SHARED_SECRET definido, a auth é dispensada —
+// o servidor só escuta em 127.0.0.1, então só a própria máquina acessa.
 const exigirSharedSecret = (req, res, next) => {
+  if (MODO_LOCAL && !PROXY_SHARED_SECRET) return next();
   const sent = req.header("x-proxy-secret");
   if (!sent || sent !== PROXY_SHARED_SECRET) {
     return res.status(401).json({ ok: false, error: "shared secret inválido" });
@@ -185,6 +225,24 @@ const exigirSharedSecret = (req, res, next) => {
 };
 app.use("/serpro", exigirSharedSecret);
 app.use("/esocial", exigirSharedSecret);
+
+// Em modo local as rotas /serpro/* (Integra Contador) não estão disponíveis:
+// elas dependem das credenciais OAuth da loja SERPRO e do CNPJ contratante,
+// que o modo local não exige no boot.
+if (MODO_LOCAL) {
+  app.use("/serpro", (_req, res) =>
+    res.status(501).json({
+      ok: false,
+      error:
+        "Rotas /serpro/* não disponíveis em modo local — este modo atende só o download de eventos do eSocial (/esocial/*).",
+    }),
+  );
+}
+
+// Interface gráfica local (public/index.html) — servida só em modo local.
+if (MODO_LOCAL) {
+  app.use(express.static(fileURLToPath(new URL("./public", import.meta.url))));
+}
 
 // Versão lida do package.json (útil para confirmar deploy).
 let PKG_VERSION = "desconhecida";
@@ -212,11 +270,21 @@ function listarRotas() {
 app.get("/healthz", (_req, res) => {
   res.json({
     ok: true,
+    modo: MODO_LOCAL ? "local" : "multi-tenant",
     ambiente: SERPRO_AMBIENTE,
     versao: PKG_VERSION,
     boot_em: BUILD_TIME,
     rotas: listarRotas(),
-    cache: snapshotCache(),
+    ...(MODO_LOCAL
+      ? {
+          cert_local: {
+            titular_nome: entryLocal.titularNome,
+            titular_cnpj: entryLocal.titularCnpj,
+            validade_em: entryLocal.validadeEm,
+            thumbprint: entryLocal.thumbprint.slice(0, 16),
+          },
+        }
+      : { cache: snapshotCache() }),
     ts: new Date().toISOString(),
   });
 });
@@ -494,9 +562,6 @@ app.use("/esocial", exigirAmbienteProducao);
 app.post("/esocial/eventos/identificadores", async (req, res) => {
   const inicio = Date.now();
   try {
-    const escritorio_id = extrairEscritorioIdOuFalhar(req, res);
-    if (!escritorio_id) return;
-
     const { cliente_cnpj, tp_evt, per_apur } = req.body ?? {};
     if (!cliente_cnpj || !tp_evt || !per_apur) {
       return res
@@ -504,7 +569,8 @@ app.post("/esocial/eventos/identificadores", async (req, res) => {
         .json({ ok: false, error: "cliente_cnpj, tp_evt e per_apur são obrigatórios" });
     }
 
-    const entry = await obterContextoMtls(escritorio_id);
+    const entry = await resolverEntryEsocial(req, res);
+    if (!entry) return;
     const resultado = await consultarIdentificadoresEventosEmpregador({
       agent: entry.agent,
       pemKey: entry.pemKey,
@@ -540,9 +606,6 @@ app.post("/esocial/eventos/identificadores", async (req, res) => {
 app.post("/esocial/eventos/download", async (req, res) => {
   const inicio = Date.now();
   try {
-    const escritorio_id = extrairEscritorioIdOuFalhar(req, res);
-    if (!escritorio_id) return;
-
     const { cliente_cnpj, ids } = req.body ?? {};
     if (!cliente_cnpj) {
       return res.status(400).json({ ok: false, error: "cliente_cnpj é obrigatório" });
@@ -551,10 +614,12 @@ app.post("/esocial/eventos/download", async (req, res) => {
     // Falha rápido se o cert não existir/expirou, e dá o resumo de cert pra
     // resposta — o download em si re-resolve o cert a cada lote (ver
     // solicitarDownloadEventosPorId) pra se autocurar se o cache evictar
-    // a entrada no meio de um download grande.
-    const entry = await obterContextoMtls(escritorio_id);
+    // a entrada no meio de um download grande. Em modo local o cert é fixo.
+    const entry = await resolverEntryEsocial(req, res);
+    if (!entry) return;
+    const escritorio_id = req.body?.escritorio_id;
     const resultado = await solicitarDownloadEventosPorId({
-      obterEntry: () => obterContextoMtls(escritorio_id),
+      obterEntry: MODO_LOCAL ? () => entryLocal : () => obterContextoMtls(escritorio_id),
       cnpjCliente: cliente_cnpj,
       ids,
     });
@@ -580,9 +645,21 @@ app.post("/esocial/eventos/download", async (req, res) => {
   }
 });
 
-app.listen(Number(PORT), () => {
-  console.log(
-    `[boot] proxy SERPRO mTLS multi-tenant escutando em :${PORT} ` +
-      `(ambiente=${SERPRO_AMBIENTE}, versao=${PKG_VERSION})`,
-  );
+// Em modo local só escuta em 127.0.0.1 (a própria máquina); no modo
+// multi-tenant escuta em todas as interfaces (Railway exige).
+const host = HOST ?? (MODO_LOCAL ? "127.0.0.1" : "0.0.0.0");
+app.listen(Number(PORT), host, () => {
+  if (MODO_LOCAL) {
+    console.log("");
+    console.log("  ┌──────────────────────────────────────────────────┐");
+    console.log("  │  Baixador de eventos do eSocial — MODO LOCAL     │");
+    console.log(`  │  Abra no navegador:  http://localhost:${PORT}       │`);
+    console.log("  └──────────────────────────────────────────────────┘");
+    console.log("");
+  } else {
+    console.log(
+      `[boot] proxy SERPRO mTLS multi-tenant escutando em ${host}:${PORT} ` +
+        `(ambiente=${SERPRO_AMBIENTE}, versao=${PKG_VERSION})`,
+    );
+  }
 });

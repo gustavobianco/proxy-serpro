@@ -1,8 +1,41 @@
-# Proxy mTLS — SERPRO Integra Contador
+# Proxy mTLS — SERPRO Integra Contador + eSocial
 
-Servidor Node.js mínimo que recebe requisições da Edge Function do Lovable Cloud e encaminha à SERPRO carregando o **certificado A1 (.pfx)** do escritório via **mTLS cliente**.
+Servidor Node.js mínimo que recebe requisições da Edge Function do Lovable Cloud e encaminha à SERPRO carregando o **certificado A1 (.pfx)** do escritório via **mTLS cliente**. Também baixa eventos já enviados ao **eSocial** (rotas `/esocial/*`) — inclusive em **modo 100% local** com interface gráfica, sem Railway nem Supabase.
 
 > **Por que isso existe:** o Edge Runtime do Deno (Supabase Functions) não suporta mTLS cliente nativo. A SERPRO exige cert A1 em toda chamada Integra Contador. Esse proxy resolve a limitação.
+
+---
+
+## ⚡ Modo local — baixar eventos do eSocial na sua máquina
+
+Não precisa de Railway, Supabase nem saber programar. Funciona em Windows, Mac ou Linux.
+
+**O que você precisa:** o arquivo do certificado A1 (`.pfx` ou `.p12`) e a senha dele.
+
+1. **Instale o Node.js** (uma vez só): baixe a versão LTS em [nodejs.org](https://nodejs.org) e instale com next-next-finish.
+2. **Baixe este projeto**: no GitHub, botão verde **Code → Download ZIP**, e extraia o ZIP numa pasta (ex: `Documentos\esocial-download`).
+3. **Copie o certificado** para dentro dessa pasta com o nome `cert.pfx`.
+4. **Crie o arquivo de configuração**: dentro da pasta, crie um arquivo chamado `.env` (com o Bloco de Notas mesmo) com estas duas linhas:
+
+   ```
+   LOCAL_CERT_PATH=./cert.pfx
+   LOCAL_CERT_SENHA=a-senha-do-seu-certificado
+   ```
+
+5. **Rode**: abra o terminal na pasta (no Windows: digite `cmd` na barra de endereço do Explorer) e execute:
+
+   ```
+   npm install
+   npm start
+   ```
+
+   Na primeira vez o `npm install` demora um pouco. Quando aparecer o quadro "MODO LOCAL", está pronto.
+
+6. **Use**: abra [http://localhost:3000](http://localhost:3000) no navegador. Informe o CNPJ do cliente, o tipo de evento e o mês — a ferramenta lista os eventos enviados e baixa os XMLs originais para a pasta Downloads.
+
+> **Segurança:** em modo local o servidor só aceita conexões da própria máquina (127.0.0.1). O certificado e a senha nunca saem do seu computador — a conexão é direta com o eSocial do governo.
+
+> **Poderes:** para consultar eventos de um cliente, o escritório precisa ter procuração eletrônica com poderes para o eSocial cadastrada no eCAC. Sem ela, o eSocial recusa a consulta.
 
 ---
 
