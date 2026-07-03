@@ -206,6 +206,103 @@ Liveness probe. Retorna `{ ok: true, ambiente, ts }`.
 }
 ```
 
+### `POST /esocial/eventos/identificadores`
+
+Consulta os identificadores (`id` + `nrRec`) dos eventos **não periódicos/não
+trabalhistas** de um empregador (folha de pagamento, totalizadores etc — ex:
+S-1200, S-1210, S-1299) em um período. É o primeiro passo antes de baixar o
+XML de cada evento. Fala direto com o Web Service SOAP oficial do eSocial
+(`webservices.download.esocial.gov.br`), **não** com o Integra Contador —
+usa o mesmo certificado A1 do escritório (com a outorga de poderes/procuração
+para o cliente) já cadastrado em `/configuracoes`.
+
+**Headers:** iguais a `/serpro/*` (`x-proxy-secret` obrigatório).
+
+**Body:**
+```jsonc
+{
+  "escritorio_id": "uuid-do-escritorio",
+  "cliente_cnpj": "00000000000000",  // CNPJ do cliente (usa só a raiz, 8 dígitos) ou CPF (11 dígitos)
+  "tp_evt": "S-1200",                // tipo do evento, 6 caracteres
+  "per_apur": "2026-06"              // "AAAA-MM" ou "AAAA"
+}
+```
+
+**Resposta (sucesso):**
+```jsonc
+{
+  "ok": true,
+  "http_status": 200,
+  "duracao_ms": 842,
+  "cert": { "thumbprint": "...", "validade_em": "..." },
+  "status": { "cd_resposta": "0", "desc_resposta": "Sucesso" },
+  "qtde_tot_evts_consulta": 2,
+  "dh_ultimo_evt_retornado": "2026-06-30T23:59:59",
+  "eventos": [
+    { "id": "ID1000000000000000000000001", "nrRec": "1.0/AAAAA" },
+    { "id": "ID1000000000000000000000002", "nrRec": "1.0/BBBBB" }
+  ]
+}
+```
+
+### `POST /esocial/eventos/download`
+
+Baixa o XML **original** (byte-a-byte, o mesmo que foi transmitido ao
+eSocial) de cada evento a partir dos `id` retornados por
+`/esocial/eventos/identificadores`. Faz chunking automático em lotes de 50
+`id`s por chamada SOAP.
+
+**Body:**
+```jsonc
+{
+  "escritorio_id": "uuid-do-escritorio",
+  "cliente_cnpj": "00000000000000",
+  "ids": ["ID1000000000000000000000001", "ID1000000000000000000000002"]
+}
+```
+
+**Resposta (sucesso):**
+```jsonc
+{
+  "ok": true,
+  "http_status": 200,
+  "duracao_ms": 1204,
+  "cert": { "thumbprint": "...", "validade_em": "..." },
+  "status": { "cd_resposta": "0", "desc_resposta": "Sucesso" },  // do último lote
+  "status_por_lote": [                          // status de CADA lote de até 50 ids
+    { "http_status": 200, "cd_resposta": "0", "desc_resposta": "Sucesso" }
+  ],
+  "arquivos": [
+    {
+      "id": "ID1000000000000000000000001",
+      "nr_rec": null,
+      "cd_resposta": "0",
+      "desc_resposta": "Sucesso",
+      "xml_evento": "<eSocial xmlns=\"...\"><evtRemun Id=\"...\">...</evtRemun></eSocial>"
+    }
+  ]
+}
+```
+
+> Se `ids` tiver mais de 50 itens, o proxy faz uma chamada SOAP por lote de
+> 50. `status` reflete só o último lote — sempre confira `status_por_lote`
+> para não perder uma falha num lote anterior. Se um lote falhar no meio do
+> processo, os arquivos dos lotes já concluídos vêm em `arquivos_parciais`
+> na resposta de erro (em vez de serem descartados).
+
+> **Ambiente:** estas rotas só funcionam com `SERPRO_AMBIENTE=producao` —
+> não há um "trial" oficial do eSocial equivalente ao da SERPRO, então o
+> proxy recusa rodar (`501`) em qualquer outro ambiente para não arriscar
+> bater no eSocial real de um cliente enquanto o resto do proxy está sendo
+> testado em trial/demonstração.
+
+> **Atenção:** estas duas rotas foram validadas offline (assinatura XML
+> com round-trip criptográfico, parsing contra respostas SOAP sintéticas
+> seguindo os XSDs oficiais do eSocial), mas ainda não foram testadas
+> contra o Web Service real — valide a primeira chamada em produção
+> consultando o CNPJ do próprio escritório antes de rodar para clientes.
+> Veja `CHANGELOG.md` (2.1.0) para detalhes técnicos.
+
 ---
 
 ## Segurança
