@@ -1,8 +1,41 @@
-# Proxy mTLS — SERPRO Integra Contador
+# Proxy mTLS — SERPRO Integra Contador + eSocial
 
-Servidor Node.js mínimo que recebe requisições da Edge Function do Lovable Cloud e encaminha à SERPRO carregando o **certificado A1 (.pfx)** do escritório via **mTLS cliente**.
+Servidor Node.js mínimo que recebe requisições da Edge Function do Lovable Cloud e encaminha à SERPRO carregando o **certificado A1 (.pfx)** do escritório via **mTLS cliente**. Também baixa eventos já enviados ao **eSocial** (rotas `/esocial/*`) — inclusive em **modo 100% local** com interface gráfica, sem Railway nem Supabase.
 
 > **Por que isso existe:** o Edge Runtime do Deno (Supabase Functions) não suporta mTLS cliente nativo. A SERPRO exige cert A1 em toda chamada Integra Contador. Esse proxy resolve a limitação.
+
+---
+
+## ⚡ Modo local — baixar eventos do eSocial na sua máquina
+
+Não precisa de Railway, Supabase nem saber programar. Funciona em Windows, Mac ou Linux.
+
+**O que você precisa:** o arquivo do certificado A1 (`.pfx` ou `.p12`) e a senha dele.
+
+1. **Instale o Node.js** (uma vez só): baixe a versão LTS em [nodejs.org](https://nodejs.org) e instale com next-next-finish.
+2. **Baixe este projeto**: no GitHub, botão verde **Code → Download ZIP**, e extraia o ZIP numa pasta (ex: `Documentos\esocial-download`).
+3. **Copie o certificado** para dentro dessa pasta com o nome `cert.pfx`.
+4. **Crie o arquivo de configuração**: dentro da pasta, crie um arquivo chamado `.env` (com o Bloco de Notas mesmo) com estas duas linhas:
+
+   ```
+   LOCAL_CERT_PATH=./cert.pfx
+   LOCAL_CERT_SENHA=a-senha-do-seu-certificado
+   ```
+
+5. **Rode**: abra o terminal na pasta (no Windows: digite `cmd` na barra de endereço do Explorer) e execute:
+
+   ```
+   npm install
+   npm start
+   ```
+
+   Na primeira vez o `npm install` demora um pouco. Quando aparecer o quadro "MODO LOCAL", está pronto.
+
+6. **Use**: abra [http://localhost:3000](http://localhost:3000) no navegador. Informe o CNPJ do cliente, o tipo de evento e o mês — a ferramenta lista os eventos enviados e baixa os XMLs originais para a pasta Downloads.
+
+> **Segurança:** em modo local o servidor só aceita conexões da própria máquina (127.0.0.1). O certificado e a senha nunca saem do seu computador — a conexão é direta com o eSocial do governo.
+
+> **Poderes:** para consultar eventos de um cliente, o escritório precisa ter procuração eletrônica com poderes para o eSocial cadastrada no eCAC. Sem ela, o eSocial recusa a consulta.
 
 ---
 
@@ -205,6 +238,103 @@ Liveness probe. Retorna `{ ok: true, ambiente, ts }`.
   "payload": { "message": "..." }
 }
 ```
+
+### `POST /esocial/eventos/identificadores`
+
+Consulta os identificadores (`id` + `nrRec`) dos eventos **não periódicos/não
+trabalhistas** de um empregador (folha de pagamento, totalizadores etc — ex:
+S-1200, S-1210, S-1299) em um período. É o primeiro passo antes de baixar o
+XML de cada evento. Fala direto com o Web Service SOAP oficial do eSocial
+(`webservices.download.esocial.gov.br`), **não** com o Integra Contador —
+usa o mesmo certificado A1 do escritório (com a outorga de poderes/procuração
+para o cliente) já cadastrado em `/configuracoes`.
+
+**Headers:** iguais a `/serpro/*` (`x-proxy-secret` obrigatório).
+
+**Body:**
+```jsonc
+{
+  "escritorio_id": "uuid-do-escritorio",
+  "cliente_cnpj": "00000000000000",  // CNPJ do cliente (usa só a raiz, 8 dígitos) ou CPF (11 dígitos)
+  "tp_evt": "S-1200",                // tipo do evento, 6 caracteres
+  "per_apur": "2026-06"              // "AAAA-MM" ou "AAAA"
+}
+```
+
+**Resposta (sucesso):**
+```jsonc
+{
+  "ok": true,
+  "http_status": 200,
+  "duracao_ms": 842,
+  "cert": { "thumbprint": "...", "validade_em": "..." },
+  "status": { "cd_resposta": "0", "desc_resposta": "Sucesso" },
+  "qtde_tot_evts_consulta": 2,
+  "dh_ultimo_evt_retornado": "2026-06-30T23:59:59",
+  "eventos": [
+    { "id": "ID1000000000000000000000001", "nrRec": "1.0/AAAAA" },
+    { "id": "ID1000000000000000000000002", "nrRec": "1.0/BBBBB" }
+  ]
+}
+```
+
+### `POST /esocial/eventos/download`
+
+Baixa o XML **original** (byte-a-byte, o mesmo que foi transmitido ao
+eSocial) de cada evento a partir dos `id` retornados por
+`/esocial/eventos/identificadores`. Faz chunking automático em lotes de 50
+`id`s por chamada SOAP.
+
+**Body:**
+```jsonc
+{
+  "escritorio_id": "uuid-do-escritorio",
+  "cliente_cnpj": "00000000000000",
+  "ids": ["ID1000000000000000000000001", "ID1000000000000000000000002"]
+}
+```
+
+**Resposta (sucesso):**
+```jsonc
+{
+  "ok": true,
+  "http_status": 200,
+  "duracao_ms": 1204,
+  "cert": { "thumbprint": "...", "validade_em": "..." },
+  "status": { "cd_resposta": "0", "desc_resposta": "Sucesso" },  // do último lote
+  "status_por_lote": [                          // status de CADA lote de até 50 ids
+    { "http_status": 200, "cd_resposta": "0", "desc_resposta": "Sucesso" }
+  ],
+  "arquivos": [
+    {
+      "id": "ID1000000000000000000000001",
+      "nr_rec": null,
+      "cd_resposta": "0",
+      "desc_resposta": "Sucesso",
+      "xml_evento": "<eSocial xmlns=\"...\"><evtRemun Id=\"...\">...</evtRemun></eSocial>"
+    }
+  ]
+}
+```
+
+> Se `ids` tiver mais de 50 itens, o proxy faz uma chamada SOAP por lote de
+> 50. `status` reflete só o último lote — sempre confira `status_por_lote`
+> para não perder uma falha num lote anterior. Se um lote falhar no meio do
+> processo, os arquivos dos lotes já concluídos vêm em `arquivos_parciais`
+> na resposta de erro (em vez de serem descartados).
+
+> **Ambiente:** estas rotas só funcionam com `SERPRO_AMBIENTE=producao` —
+> não há um "trial" oficial do eSocial equivalente ao da SERPRO, então o
+> proxy recusa rodar (`501`) em qualquer outro ambiente para não arriscar
+> bater no eSocial real de um cliente enquanto o resto do proxy está sendo
+> testado em trial/demonstração.
+
+> **Atenção:** estas duas rotas foram validadas offline (assinatura XML
+> com round-trip criptográfico, parsing contra respostas SOAP sintéticas
+> seguindo os XSDs oficiais do eSocial), mas ainda não foram testadas
+> contra o Web Service real — valide a primeira chamada em produção
+> consultando o CNPJ do próprio escritório antes de rodar para clientes.
+> Veja `CHANGELOG.md` (2.1.0) para detalhes técnicos.
 
 ---
 

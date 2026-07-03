@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Baixador de eventos do eSocial</title>
+<style>
+  :root {
+    --bg: #f7f8f6;
+    --surface: #ffffff;
+    --ink: #1a2421;
+    --muted: #5c6b64;
+    --accent: #0e6e55;
+    --accent-ink: #ffffff;
+    --border: #dde3df;
+    --ok-bg: #e7f3ed;
+    --ok-ink: #0e6e55;
+    --err-bg: #faeae5;
+    --err-ink: #b3452e;
+    --chip-bg: #eef2ef;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151a18;
+      --surface: #1e2522;
+      --ink: #e4eae6;
+      --muted: #93a29a;
+      --accent: #3dbd94;
+      --accent-ink: #0c1512;
+      --border: #303a35;
+      --ok-bg: #16362b;
+      --ok-ink: #5fd9ae;
+      --err-bg: #3d221b;
+      --err-ink: #f0a08b;
+      --chip-bg: #26302b;
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #f7f8f6; --surface: #ffffff; --ink: #1a2421; --muted: #5c6b64;
+    --accent: #0e6e55; --accent-ink: #ffffff; --border: #dde3df;
+    --ok-bg: #e7f3ed; --ok-ink: #0e6e55; --err-bg: #faeae5; --err-ink: #b3452e;
+    --chip-bg: #eef2ef;
+  }
+  :root[data-theme="dark"] {
+    --bg: #151a18; --surface: #1e2522; --ink: #e4eae6; --muted: #93a29a;
+    --accent: #3dbd94; --accent-ink: #0c1512; --border: #303a35;
+    --ok-bg: #16362b; --ok-ink: #5fd9ae; --err-bg: #3d221b; --err-ink: #f0a08b;
+    --chip-bg: #26302b;
+  }
+
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.55 -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  main { max-width: 860px; margin: 0 auto; padding: 32px 20px 80px; }
+
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 16px; margin-bottom: 6px; }
+  h1 { font-size: 26px; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
+  .subtitulo { color: var(--muted); margin: 0 0 24px; font-size: 15px; }
+
+  .chip {
+    display: inline-flex; align-items: center; gap: 7px;
+    background: var(--chip-bg); border: 1px solid var(--border);
+    border-radius: 999px; padding: 3px 12px; font-size: 13px; color: var(--muted);
+  }
+  .chip b { color: var(--ink); font-weight: 600; }
+  .chip .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+
+  section.card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 22px 24px; margin-bottom: 20px;
+  }
+  .passo {
+    display: flex; align-items: center; gap: 10px; margin: 0 0 16px;
+    font-size: 17px; font-weight: 650;
+  }
+  .passo .num {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 26px; height: 26px; border-radius: 50%;
+    background: var(--accent); color: var(--accent-ink);
+    font-size: 14px; font-weight: 700; flex: none;
+  }
+
+  form .linhas { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+  @media (max-width: 640px) { form .linhas { grid-template-columns: 1fr; } }
+  label.campo { display: flex; flex-direction: column; gap: 5px; }
+  label.campo > span {
+    font-size: 11.5px; font-weight: 650; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  input, select {
+    font: inherit; color: var(--ink); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 7px; padding: 9px 11px;
+    width: 100%;
+  }
+  input:focus-visible, select:focus-visible, button:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 1px;
+  }
+  .ajuda { font-size: 13px; color: var(--muted); margin: 6px 0 0; }
+
+  .acoes { display: flex; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
+  button {
+    font: inherit; font-weight: 600; cursor: pointer;
+    border-radius: 7px; padding: 9px 20px; border: 1px solid transparent;
+  }
+  button.primario { background: var(--accent); color: var(--accent-ink); }
+  button.primario:hover { filter: brightness(1.08); }
+  button.secundario { background: transparent; color: var(--ink); border-color: var(--border); }
+  button.secundario:hover { background: var(--chip-bg); }
+  button:disabled { opacity: 0.55; cursor: default; filter: none; }
+
+  .aviso { border-radius: 8px; padding: 12px 15px; font-size: 14.5px; margin-top: 16px; }
+  .aviso.ok { background: var(--ok-bg); color: var(--ok-ink); }
+  .aviso.erro { background: var(--err-bg); color: var(--err-ink); white-space: pre-wrap; }
+  .aviso.quieto { background: var(--chip-bg); color: var(--muted); }
+
+  .tabela-wrap { overflow-x: auto; margin-top: 4px; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  th {
+    font-size: 11.5px; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--muted); font-weight: 650;
+  }
+  td.mono { font-family: ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace; font-size: 13px; font-variant-numeric: tabular-nums; }
+  tr:hover td { background: var(--chip-bg); }
+  td .baixado { color: var(--ok-ink); font-weight: 600; font-size: 13px; }
+  td .falhou { color: var(--err-ink); font-weight: 600; font-size: 13px; }
+
+  .contagem { color: var(--muted); font-size: 14px; margin-left: auto; align-self: center; }
+
+  footer { color: var(--muted); font-size: 13px; margin-top: 32px; }
+  footer code { background: var(--chip-bg); padding: 1px 6px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Baixador de eventos do eSocial</h1>
+    <span class="chip" id="chip-cert" hidden><span class="dot"></span><span id="chip-cert-texto"></span></span>
+  </header>
+  <p class="subtitulo">Consulte e baixe o XML original dos eventos já enviados ao eSocial, usando o certificado digital do escritório.</p>
+
+  <section class="card">
+    <p class="passo"><span class="num">1</span> Consultar eventos enviados</p>
+    <form id="form-consulta">
+      <div class="linhas">
+        <label class="campo">
+          <span>CNPJ do cliente</span>
+          <input id="cnpj" inputmode="numeric" placeholder="00.000.000/0000-00" required>
+        </label>
+        <label class="campo">
+          <span>Tipo de evento</span>
+          <select id="tp-evt">
+            <option value="S-1200">S-1200 — Remuneração</option>
+            <option value="S-1210">S-1210 — Pagamentos</option>
+            <option value="S-1299">S-1299 — Fechamento da folha</option>
+            <option value="S-1298">S-1298 — Reabertura da folha</option>
+            <option value="S-1000">S-1000 — Informações do empregador</option>
+            <option value="S-2200">S-2200 — Admissão</option>
+            <option value="S-2205">S-2205 — Alteração cadastral</option>
+            <option value="S-2206">S-2206 — Alteração contratual</option>
+            <option value="S-2230">S-2230 — Afastamento temporário</option>
+            <option value="S-2299">S-2299 — Desligamento</option>
+            <option value="S-2300">S-2300 — TSVE — início</option>
+            <option value="S-2399">S-2399 — TSVE — término</option>
+            <option value="S-3000">S-3000 — Exclusão de evento</option>
+            <option value="outro">Outro (digitar código)…</option>
+          </select>
+        </label>
+        <label class="campo">
+          <span>Período (mês de apuração)</span>
+          <input id="per-apur" type="month" required>
+        </label>
+      </div>
+      <div class="linhas" id="linha-outro" hidden style="margin-top: 14px;">
+        <label class="campo">
+          <span>Código do evento (6 caracteres)</span>
+          <input id="tp-evt-outro" placeholder="S-1234" maxlength="6">
+        </label>
+      </div>
+      <div class="linhas" id="campos-multitenant" hidden style="margin-top: 14px;">
+        <label class="campo">
+          <span>ID do escritório (uuid)</span>
+          <input id="escritorio-id" placeholder="00000000-0000-0000-0000-000000000000">
+        </label>
+        <label class="campo">
+          <span>Segredo do proxy (x-proxy-secret)</span>
+          <input id="proxy-secret" type="password">
+        </label>
+      </div>
+      <div class="acoes">
+        <button type="submit" class="primario" id="btn-consultar">Consultar eventos</button>
+      </div>
+    </form>
+    <div id="aviso-consulta" hidden></div>
+  </section>
+
+  <section class="card" id="secao-resultados" hidden>
+    <p class="passo"><span class="num">2</span> Baixar os arquivos XML</p>
+    <div class="acoes" style="margin: 0 0 14px;">
+      <button class="primario" id="btn-baixar-sel">Baixar selecionados</button>
+      <button class="secundario" id="btn-baixar-todos">Baixar todos</button>
+      <span class="contagem" id="contagem"></span>
+    </div>
+    <div class="tabela-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 34px;"><input type="checkbox" id="sel-todos" checked aria-label="Selecionar todos"></th>
+            <th>Identificador do evento</th>
+            <th>Nº do recibo</th>
+            <th style="width: 110px;">Situação</th>
+          </tr>
+        </thead>
+        <tbody id="tbody-eventos"></tbody>
+      </table>
+    </div>
+    <div id="aviso-download" hidden></div>
+  </section>
+
+  <footer>
+    Os arquivos baixados vão para a pasta de Downloads do navegador, um <code>.xml</code> por evento —
+    é o mesmo XML assinado que foi transmitido ao eSocial, válido para auditoria.
+  </footer>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var $ = function (id) { return document.getElementById(id); };
+  var estado = { modoLocal: true, eventos: [] };
+
+  // ---- descobre o modo do servidor e o certificado carregado ----
+  fetch("/healthz").then(function (r) { return r.json(); }).then(function (h) {
+    estado.modoLocal = h.modo === "local";
+    if (!estado.modoLocal) $("campos-multitenant").hidden = false;
+    if (h.cert_local) {
+      var validade = (h.cert_local.validade_em || "").slice(0, 10).split("-").reverse().join("/");
+      $("chip-cert-texto").innerHTML =
+        "Certificado: <b>" + (h.cert_local.titular_nome || h.cert_local.titular_cnpj || "carregado") + "</b>" +
+        (validade ? " · válido até " + validade : "");
+      $("chip-cert").hidden = false;
+    }
+  }).catch(function () { /* healthz indisponível não impede o uso */ });
+
+  // ---- campo "outro" tipo de evento ----
+  $("tp-evt").addEventListener("change", function () {
+    $("linha-outro").hidden = this.value !== "outro";
+  });
+
+  // ---- helpers ----
+  function tipoEvento() {
+    var sel = $("tp-evt").value;
+    return sel === "outro" ? $("tp-evt-outro").value.trim() : sel;
+  }
+  function corpoComum() {
+    var body = { cliente_cnpj: $("cnpj").value.replace(/\D/g, "") };
+    if (!estado.modoLocal) body.escritorio_id = $("escritorio-id").value.trim();
+    return body;
+  }
+  function headers() {
+    var h = { "Content-Type": "application/json" };
+    var secret = estado.modoLocal ? "" : $("proxy-secret").value;
+    if (secret) h["x-proxy-secret"] = secret;
+    return h;
+  }
+  function mostrarAviso(id, tipo, texto) {
+    var el = $(id);
+    el.className = "aviso " + tipo;
+    el.textContent = texto;
+    el.hidden = false;
+  }
+  function esconderAviso(id) { $(id).hidden = true; }
+  function mensagemDeErro(resp) {
+    var partes = [];
+    if (resp.error) partes.push(resp.error);
+    if (resp.status && resp.status.desc_resposta) partes.push(resp.status.desc_resposta);
+    if (resp.diagnostico) partes.push("Dica: " + resp.diagnostico);
+    return partes.join("\n") || "Erro desconhecido — veja o terminal do servidor.";
+  }
+
+  // ---- passo 1: consultar ----
+  $("form-consulta").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    esconderAviso("aviso-consulta");
+    esconderAviso("aviso-download");
+    $("secao-resultados").hidden = true;
+
+    var body = corpoComum();
+    body.tp_evt = tipoEvento();
+    body.per_apur = $("per-apur").value; // input type=month já entrega AAAA-MM
+
+    var btn = $("btn-consultar");
+    btn.disabled = true; btn.textContent = "Consultando…";
+
+    fetch("/esocial/eventos/identificadores", {
+      method: "POST", headers: headers(), body: JSON.stringify(body)
+    }).then(function (r) { return r.json(); }).then(function (resp) {
+      if (!resp.ok) { mostrarAviso("aviso-consulta", "erro", mensagemDeErro(resp)); return; }
+
+      estado.eventos = resp.eventos || [];
+      if (estado.eventos.length === 0) {
+        mostrarAviso("aviso-consulta", "quieto",
+          "Nenhum evento " + body.tp_evt + " encontrado para " + body.per_apur + ".");
+        return;
+      }
+      mostrarAviso("aviso-consulta", "ok",
+        estado.eventos.length + " evento(s) encontrado(s)." +
+        (resp.qtde_tot_evts_consulta ? " Total informado pelo eSocial: " + resp.qtde_tot_evts_consulta + "." : ""));
+      montarTabela();
+      $("secao-resultados").hidden = false;
+    }).catch(function (err) {
+      mostrarAviso("aviso-consulta", "erro", "Não consegui falar com o servidor local: " + err.message);
+    }).finally(function () {
+      btn.disabled = false; btn.textContent = "Consultar eventos";
+    });
+  });
+
+  function montarTabela() {
+    var tbody = $("tbody-eventos");
+    tbody.innerHTML = "";
+    estado.eventos.forEach(function (e, i) {
+      var tr = document.createElement("tr");
+      tr.innerHTML =
+        '<td><input type="checkbox" class="sel-evt" data-i="' + i + '" checked aria-label="Selecionar evento"></td>' +
+        '<td class="mono"></td><td class="mono"></td><td class="situacao"></td>';
+      tr.children[1].textContent = e.id || "—";
+      tr.children[2].textContent = e.nrRec || "—";
+      tbody.appendChild(tr);
+    });
+    atualizarContagem();
+  }
+
+  $("sel-todos").addEventListener("change", function () {
+    var marcado = this.checked;
+    document.querySelectorAll(".sel-evt").forEach(function (cb) { cb.checked = marcado; });
+    atualizarContagem();
+  });
+  document.addEventListener("change", function (ev) {
+    if (ev.target.classList && ev.target.classList.contains("sel-evt")) atualizarContagem();
+  });
+  function atualizarContagem() {
+    var n = document.querySelectorAll(".sel-evt:checked").length;
+    $("contagem").textContent = n + " de " + estado.eventos.length + " selecionado(s)";
+  }
+  function idsSelecionados(todos) {
+    var ids = [];
+    document.querySelectorAll(".sel-evt").forEach(function (cb) {
+      if (todos || cb.checked) {
+        var e = estado.eventos[Number(cb.dataset.i)];
+        if (e && e.id) ids.push(e.id);
+      }
+    });
+    return ids;
+  }
+
+  // ---- passo 2: baixar ----
+  function baixar(todos) {
+    esconderAviso("aviso-download");
+    var ids = idsSelecionados(todos);
+    if (ids.length === 0) {
+      mostrarAviso("aviso-download", "quieto", "Nenhum evento selecionado.");
+      return;
+    }
+    var body = corpoComum();
+    body.ids = ids;
+
+    var b1 = $("btn-baixar-sel"), b2 = $("btn-baixar-todos");
+    b1.disabled = b2.disabled = true;
+    mostrarAviso("aviso-download", "quieto", "Baixando " + ids.length + " evento(s) do eSocial…");
+
+    fetch("/esocial/eventos/download", {
+      method: "POST", headers: headers(), body: JSON.stringify(body)
+    }).then(function (r) { return r.json(); }).then(function (resp) {
+      var arquivos = resp.arquivos || resp.arquivos_parciais || [];
+      var salvos = 0, falhas = 0;
+
+      arquivos.forEach(function (a, idx) {
+        marcarSituacao(a);
+        if (a.xml_evento) {
+          salvos++;
+          // pequeno intervalo entre downloads pra não assustar o navegador
+          setTimeout(function () { salvarXml(a); }, idx * 250);
+        } else {
+          falhas++;
+        }
+      });
+
+      if (!resp.ok || falhas > 0) {
+        mostrarAviso("aviso-download", "erro",
+          (salvos > 0 ? salvos + " arquivo(s) salvos na pasta Downloads. " : "") +
+          (falhas > 0 ? falhas + " evento(s) sem arquivo (veja a coluna Situação). " : "") +
+          (resp.ok ? "" : "\n" + mensagemDeErro(resp)));
+      } else {
+        mostrarAviso("aviso-download", "ok",
+          salvos + " arquivo(s) XML salvos na pasta Downloads do navegador.");
+      }
+    }).catch(function (err) {
+      mostrarAviso("aviso-download", "erro", "Não consegui falar com o servidor local: " + err.message);
+    }).finally(function () {
+      b1.disabled = b2.disabled = false;
+    });
+  }
+  $("btn-baixar-sel").addEventListener("click", function () { baixar(false); });
+  $("btn-baixar-todos").addEventListener("click", function () { baixar(true); });
+
+  function marcarSituacao(arquivo) {
+    var chave = arquivo.id || arquivo.nr_rec;
+    var linhas = $("tbody-eventos").children;
+    for (var i = 0; i < linhas.length; i++) {
+      var e = estado.eventos[i];
+      if (e && (e.id === chave || e.nrRec === chave)) {
+        var cel = linhas[i].querySelector(".situacao");
+        cel.innerHTML = arquivo.xml_evento
+          ? '<span class="baixado">✓ baixado</span>'
+          : '<span class="falhou" title="' + (arquivo.desc_resposta || "") + '">✕ falhou</span>';
+        return;
+      }
+    }
+  }
+
+  function salvarXml(arquivo) {
+    var nome = (arquivo.id || arquivo.nr_rec || "evento").replace(/[^\w.-]/g, "_") + ".xml";
+    var blob = new Blob([arquivo.xml_evento], { type: "application/xml" });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url; a.download = nome;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+  }
+
+  // máscara leve no CNPJ
+  $("cnpj").addEventListener("input", function () {
+    var d = this.value.replace(/\D/g, "").slice(0, 14);
+    var f = d;
+    if (d.length > 12) f = d.replace(/(\d{2})(\d{3})(\d{3})(\d{4})(\d{0,2})/, "$1.$2.$3/$4-$5");
+    else if (d.length > 8) f = d.replace(/(\d{2})(\d{3})(\d{3})(\d{0,4})/, "$1.$2.$3/$4");
+    else if (d.length > 5) f = d.replace(/(\d{2})(\d{3})(\d{0,3})/, "$1.$2.$3");
+    else if (d.length > 2) f = d.replace(/(\d{2})(\d{0,3})/, "$1.$2");
+    this.value = f;
+  });
+})();
+</script>
+</body>
+</html>
