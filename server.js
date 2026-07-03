@@ -34,9 +34,9 @@
 //   - Boot NÃO falha se nenhum cert existir; só requests de escritórios sem
 //     cert ativo é que erram (404 certificado_nao_encontrado).
 
-import "dotenv/config";
+import dotenv from "dotenv";
 import express from "express";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { fetch as undiciFetch } from "undici";
 import {
@@ -58,6 +58,14 @@ import {
   classificarErroMtls,
   certificadoErrorParaResposta,
 } from "./lib/httpErros.js";
+
+dotenv.config();
+// O Bloco de Notas do Windows costuma salvar o arquivo como ".env.txt" com a
+// extensão oculta no Explorer — aceita esse nome também (o ".env" tem prioridade).
+if (existsSync(".env.txt")) {
+  dotenv.config({ path: ".env.txt" });
+  console.log('[boot] aviso: encontrei ".env.txt" e vou usá-lo — o nome ideal do arquivo é só ".env".');
+}
 
 const {
   PORT = "3000",
@@ -94,6 +102,40 @@ if (MODO_LOCAL) {
     process.exit(1);
   }
 } else {
+  // Antes de cobrar as variáveis do modo multi-tenant (Railway), detecta se
+  // a pessoa na verdade queria o MODO LOCAL e errou algum detalhe do .env —
+  // é o caso típico de quem só quer o baixador de eventos do eSocial.
+  const pareceQuererModoLocal =
+    LOCAL_CERT_PATH || LOCAL_CERT_SENHA || existsSync("./cert.pfx") || existsSync("./cert.p12");
+  const faltamTodasDoRailway = !PROXY_SHARED_SECRET && !SUPABASE_URL;
+
+  if (pareceQuererModoLocal && faltamTodasDoRailway) {
+    console.error("");
+    console.error("[boot] Parece que você quer rodar em MODO LOCAL, mas a configuração está incompleta.");
+    if (LOCAL_CERT_PATH && !LOCAL_CERT_SENHA) {
+      console.error('[boot] → Falta a linha LOCAL_CERT_SENHA=... no arquivo ".env".');
+    } else if (!LOCAL_CERT_PATH && LOCAL_CERT_SENHA) {
+      console.error('[boot] → Falta a linha LOCAL_CERT_PATH=./cert.pfx no arquivo ".env".');
+    } else if (!existsSync(".env") && !existsSync(".env.txt")) {
+      console.error('[boot] → Não encontrei o arquivo ".env" nesta pasta.');
+      console.error("[boot]   Crie um arquivo chamado .env (exatamente assim, com o ponto e sem .txt no fim)");
+      console.error("[boot]   nesta mesma pasta, com estas duas linhas:");
+      console.error("[boot]");
+      console.error("[boot]       LOCAL_CERT_PATH=./cert.pfx");
+      console.error("[boot]       LOCAL_CERT_SENHA=a-senha-do-seu-certificado");
+      console.error("[boot]");
+      console.error('[boot]   Dica (Windows): no Bloco de Notas, em "Salvar como", escolha Tipo = "Todos os');
+      console.error('[boot]   arquivos (*.*)" e digite o nome ".env" com aspas — senão ele vira ".env.txt".');
+    } else {
+      console.error('[boot] → O arquivo .env existe, mas não tem as linhas LOCAL_CERT_PATH e LOCAL_CERT_SENHA.');
+      console.error("[boot]   Confira se as duas linhas estão escritas exatamente assim (sem espaços antes):");
+      console.error("[boot]       LOCAL_CERT_PATH=./cert.pfx");
+      console.error("[boot]       LOCAL_CERT_SENHA=a-senha-do-seu-certificado");
+    }
+    console.error("");
+    process.exit(1);
+  }
+
   const required = {
     PROXY_SHARED_SECRET,
     SERPRO_CONSUMER_KEY,
@@ -106,6 +148,10 @@ if (MODO_LOCAL) {
   for (const [k, v] of Object.entries(required)) {
     if (!v) {
       console.error(`[boot] variável obrigatória ausente: ${k}`);
+      console.error(
+        "[boot] (Se a intenção era rodar 100% local com o certificado em arquivo, o que falta é o .env " +
+          "com LOCAL_CERT_PATH e LOCAL_CERT_SENHA — veja a seção \"Modo local\" do README.)",
+      );
       process.exit(1);
     }
   }
